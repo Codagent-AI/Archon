@@ -921,6 +921,7 @@ describe('CodexProvider', () => {
         config: {
           sandbox_workspace_write: { network_access: true, writable_roots: ['/extra'] },
           web_search: 'live',
+          model_reasoning_effort: 'high',
         },
       });
       expect(paramsOf(server, 'turn/start')).toEqual({
@@ -941,6 +942,26 @@ describe('CodexProvider', () => {
       expect(paramsOf(server, 'thread/start')?.config).not.toHaveProperty('skills');
     });
 
+    test('a thread starts at the resolved effort, and sets none when there is none', async () => {
+      const { provider, server } = providerWith();
+      await run(provider, { assistantConfig: { modelReasoningEffort: 'low' } });
+      expect(paramsOf(server, 'thread/start')?.config).toMatchObject({
+        model_reasoning_effort: 'low',
+      });
+
+      await run(provider, { nodeConfig: { effort: 'medium' } });
+      expect(paramsOf(server, 'thread/start')?.config).toMatchObject({
+        model_reasoning_effort: 'medium',
+      });
+
+      const { provider: bare, server: bareServer } = providerWith();
+      await run(bare);
+      expect(paramsOf(bareServer, 'thread/start')?.config).not.toHaveProperty(
+        'model_reasoning_effort'
+      );
+      expect(paramsOf(bareServer, 'turn/start')).not.toHaveProperty('effort');
+    });
+
     test('resumes an existing thread and reports resumed', async () => {
       const { provider, server } = providerWith();
       const chunks = await run(provider, undefined, 'existing-thread');
@@ -958,7 +979,7 @@ describe('CodexProvider', () => {
       const options: SendQueryOptions = {
         model: 'gpt-request',
         assistantConfig: { webSearchMode: 'live', additionalDirectories: ['/extra'] },
-        nodeConfig: { nodeId: 'implement', mcp: 'mcp.json' },
+        nodeConfig: { nodeId: 'implement', mcp: 'mcp.json', effort: 'medium' },
       };
       const { provider, server } = providerWith();
       for await (const _ of provider.sendQuery('p', dir, undefined, options)) {
@@ -974,6 +995,7 @@ describe('CodexProvider', () => {
         excludeTurns: true,
       });
       expect(started).toBeDefined();
+      expect(started?.config).toMatchObject({ model_reasoning_effort: 'medium' });
       expect(resumed).toEqual(started ?? {});
     });
 
@@ -983,7 +1005,7 @@ describe('CodexProvider', () => {
       const options: SendQueryOptions = {
         model: 'gpt-request',
         assistantConfig: { webSearchMode: 'live', additionalDirectories: ['/extra'] },
-        nodeConfig: { nodeId: 'implement', mcp: 'mcp.json' },
+        nodeConfig: { nodeId: 'implement', mcp: 'mcp.json', effort: 'medium' },
       };
       const { provider, server } = providerWith({
         configuredServers: ['posthog'],
@@ -1008,7 +1030,10 @@ describe('CodexProvider', () => {
       });
       // The scoped config is not stored with the source thread; without it the fork would
       // load the user's MCP servers and plugins again.
-      expect(started?.config).toMatchObject({ mcp_servers: { posthog: { enabled: false } } });
+      expect(started?.config).toMatchObject({
+        mcp_servers: { posthog: { enabled: false } },
+        model_reasoning_effort: 'medium',
+      });
       expect(forked).toEqual(started ?? {});
       expect(resultOf(chunks)).toMatchObject({
         sessionId: 'existing-thread-fork-1',
@@ -1501,7 +1526,7 @@ describe('CodexProvider', () => {
     describe('on a model that cannot take tools and a schema together', () => {
       const options = (model: string): SendQueryOptions => ({
         assistantConfig: { model, toolFreeStructuredOutputModels: ['glm-5.3'] },
-        nodeConfig: { nodeId: 'review', output_format: schema },
+        nodeConfig: { nodeId: 'review', output_format: schema, effort: 'medium' },
       });
       const toolTurn: FakeTurnScript = {
         notifications: [
@@ -1530,11 +1555,14 @@ describe('CodexProvider', () => {
             (method: string) =>
               requests.find(r => r.method === method)?.params
         );
-        expect(first('thread/start')?.config).toMatchObject({ features: { multi_agent: false } });
+        expect(first('thread/start')?.config).toMatchObject({
+          features: { multi_agent: false },
+          model_reasoning_effort: 'medium',
+        });
         expect(first('turn/start')).not.toHaveProperty('outputSchema');
         expect(second('thread/resume')).toMatchObject({
           threadId: THREAD_ID,
-          config: TOOL_FREE_THREAD_CONFIG,
+          config: { ...TOOL_FREE_THREAD_CONFIG, model_reasoning_effort: 'medium' },
         });
         const [, catalogFlag, catalogArg] = server.processes[1].args;
         expect(catalogFlag).toBe('-c');
@@ -1887,7 +1915,7 @@ describe('CodexProvider', () => {
       });
       const chunks: MessageChunk[] = [];
       for await (const chunk of provider.sendQuery('p', dir, undefined, {
-        nodeConfig: { nodeId: 'implement', mcp: 'mcp.json' },
+        nodeConfig: { nodeId: 'implement', mcp: 'mcp.json', effort: 'medium' },
       })) {
         chunks.push(chunk);
       }

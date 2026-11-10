@@ -455,6 +455,10 @@ export class CodexProvider implements IAgentProvider {
       const login = codexLogin(launch.env);
       const binary = await launch.resolveBinary();
       const nodePlugins = nodePluginsOf(requestOptions, titleRequest);
+      const effort = resolveModelReasoningEffort(
+        requestOptions?.nodeConfig,
+        launch.config.modelReasoningEffort
+      );
       const { request, finalTurn } = turnRequestOf(prompt, cwd, requestOptions, {
         tools,
         login,
@@ -462,8 +466,13 @@ export class CodexProvider implements IAgentProvider {
         model,
         titleRequest,
         nodePlugins,
-        threadConfig: buildThreadConfig(launch.config, mcpServers, nodePlugins !== undefined),
-        modelReasoningEffort: launch.config.modelReasoningEffort,
+        threadConfig: buildThreadConfig(
+          launch.config,
+          mcpServers,
+          nodePlugins !== undefined,
+          effort
+        ),
+        effort,
         splitsStructuredOutput: !titleRequest && splitsStructuredOutput(launch.config, model),
         run,
       });
@@ -492,7 +501,12 @@ export class CodexProvider implements IAgentProvider {
         abortSignal,
       });
       if (call.toolTurnResult && finalTurn) {
-        const finalRequest = finalTurnRequestOf(request, finalTurn.turnParams, launch.config);
+        const finalRequest = finalTurnRequestOf(
+          request,
+          finalTurn.turnParams,
+          launch.config,
+          effort
+        );
         yield* this.finalTurn(
           run,
           finalRequest,
@@ -618,7 +632,8 @@ interface TurnInputs {
   titleRequest: boolean;
   nodePlugins: readonly string[] | undefined;
   threadConfig: CodexConfig;
-  modelReasoningEffort: Parameters<typeof resolveModelReasoningEffort>[1];
+  /** The resolved reasoning effort, already in `threadConfig`; each turn also names it. */
+  effort: ReturnType<typeof resolveModelReasoningEffort>;
   /** The model's route cannot take tools and an output schema in one request. */
   splitsStructuredOutput: boolean;
   run: CodexRun;
@@ -675,7 +690,8 @@ function withToolTurnOf(final: ResultChunk, toolTurn: ResultChunk | undefined): 
 function finalTurnRequestOf(
   request: Omit<TurnRequest, 'connection'>,
   turnParams: TurnRequest['turnParams'],
-  launchConfig: CodexProviderDefaults
+  launchConfig: CodexProviderDefaults,
+  effort: TurnInputs['effort']
 ): Omit<TurnRequest, 'connection' | 'resumeSessionId'> {
   return {
     ...request,
@@ -685,7 +701,10 @@ function finalTurnRequestOf(
     nodePlugins: [],
     threadParams: {
       ...request.threadParams,
-      config: { ...buildThreadConfig(launchConfig, undefined, true), ...TOOL_FREE_THREAD_CONFIG },
+      config: {
+        ...buildThreadConfig(launchConfig, undefined, true, effort),
+        ...TOOL_FREE_THREAD_CONFIG,
+      },
     },
     turnParams,
     hasOutputFormat: true,
@@ -707,11 +726,7 @@ function turnRequestOf(
   finalTurn: { model: string; turnParams: TurnRequest['turnParams'] } | undefined;
 } {
   const { outputSchema, hasOutputFormat } = buildOutputSchema(requestOptions);
-  const effort = resolveModelReasoningEffort(
-    requestOptions?.nodeConfig,
-    inputs.modelReasoningEffort
-  );
-  const { model, run } = inputs;
+  const { model, run, effort } = inputs;
   // `splitsStructuredOutput` implies a model; the check narrows it for the final turn.
   const split = inputs.splitsStructuredOutput && outputSchema !== undefined && model !== undefined;
   const finalTurn = split

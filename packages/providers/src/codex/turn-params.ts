@@ -136,12 +136,15 @@ export function isWorkflowNode(requestOptions?: SendQueryOptions): boolean {
 
 /**
  * The config overrides a thread starts with. Codex merges them over the user's own
- * config.toml; it never replaces it.
+ * config.toml; it never replaces it. The reasoning effort belongs here, not only on the turn:
+ * an effort that first arrives on `turn/start` is recorded as a mid-session
+ * `configuration_update` whenever it differs from the user's config.toml.
  */
 export function buildThreadConfig(
   codexConfig: CodexProviderDefaults,
   mcpServers: CodexConfig | undefined,
-  scoped: boolean
+  scoped: boolean,
+  effort?: CodexProviderDefaults['modelReasoningEffort']
 ): CodexConfig {
   const config: CodexConfig = {
     sandbox_workspace_write: {
@@ -151,6 +154,7 @@ export function buildThreadConfig(
         : {}),
     },
   };
+  if (effort) config.model_reasoning_effort = effort;
   if (codexConfig.webSearchMode) config.web_search = codexConfig.webSearchMode;
   if (mcpServers) config.mcp_servers = mcpServers;
   // Scoped requests must not advertise ambient skills. Direct chat keeps the user's setting.
