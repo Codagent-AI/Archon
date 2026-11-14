@@ -899,6 +899,79 @@ describe('CodexProvider', () => {
       expect(resultOf(chunks).tokens).toBeUndefined();
     });
 
+    // Codex reports a subagent's usage on the subagent's own thread and turn, as
+    // `codex app-server` 0.166.0 does for a `spawn_agent` child.
+    test('a turn counts the usage of the subagents it spawned, and of no other thread', async () => {
+      const chunks = await streamOf({
+        notifications: [
+          itemStarted(subAgentActivity('started')),
+          itemCompleted(subAgentActivity('started')),
+          tokenUsage({ input: 100, output: 10, cached: 80 }),
+          // A subagent resumed from an earlier turn: its total already holds that turn.
+          tokenUsage(
+            { input: 550, output: 25, cached: 440 },
+            { input: 50, output: 5, cached: 40 },
+            'child-turn',
+            'child-thread'
+          ),
+          tokenUsage(
+            { input: 620, output: 29, cached: 500 },
+            { input: 70, output: 4, cached: 60 },
+            'child-turn',
+            'child-thread'
+          ),
+          tokenUsage({ input: 999, output: 999 }, undefined, 'other-turn', 'unrelated-thread'),
+          itemStarted(subAgentActivity('completed')),
+          itemCompleted(subAgentActivity('completed')),
+        ],
+      });
+      expect(resultOf(chunks).tokens).toEqual({
+        input: 100 + 120,
+        output: 10 + 9,
+        cacheRead: 80 + 100,
+        cacheWrite: 0,
+      });
+      expect(chunks.filter(c => c.type === 'warning')).toEqual([]);
+    });
+
+    test('warns once when a subagent uses tokens after the result, which cannot count them', async () => {
+      const { provider, server } = providerWith({
+        notifications: [
+          itemStarted(subAgentActivity('started')),
+          itemCompleted(subAgentActivity('started')),
+          tokenUsage({ input: 40, output: 4, cached: 30 }, undefined, TURN_ID, 'child-thread'),
+          tokenUsage({ input: 100, output: 10, cached: 80 }),
+          turnCompleted('completed'),
+        ],
+        completion: null,
+      });
+      const chunks: MessageChunk[] = [];
+      for await (const chunk of provider.sendQuery('p', '/workspace')) {
+        chunks.push(chunk);
+        if (chunk.type === 'result') {
+          const process = server.processes[0];
+          process.send(
+            tokenUsage({ input: 90, output: 9, cached: 70 }, undefined, TURN_ID, 'child-thread')
+          );
+          process.send(
+            tokenUsage({ input: 95, output: 9, cached: 70 }, undefined, TURN_ID, 'child-thread')
+          );
+          process.send(itemStarted(subAgentActivity('completed')));
+          process.send(itemCompleted(subAgentActivity('completed')));
+        }
+      }
+      expect(chunks.filter(c => c.type === 'warning')).toEqual([
+        expect.objectContaining({ code: 'codex.subagent_usage_after_result' }),
+      ]);
+      expect(resultOf(chunks).tokens).toEqual({
+        input: 100 + 40,
+        output: 10 + 4,
+        cacheRead: 80 + 30,
+        cacheWrite: 0,
+      });
+      expect(chunks.at(-1)).toEqual({ type: 'settled' });
+    });
+
     test('initializes, then starts a thread and a turn with Archon’s settings', async () => {
       const { provider, server } = providerWith();
       await run(provider, {
