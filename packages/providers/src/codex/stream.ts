@@ -4,8 +4,8 @@
  * parent turn completes and the background work it started has drained.
  */
 import { requireMcpConnections, type McpStatus } from '../mcp/readiness';
-import { BUNDLED_VERSION, createLogger } from '@archon/paths';
-import { sessionPreview, toolCallSchema, truncateToolOutput } from '@archon/provider-contract';
+import { createLogger } from '@archon/paths';
+import { toolCallSchema, truncateToolOutput } from '@archon/provider-contract';
 import {
   mergeTokenUsage,
   type MessageChunk,
@@ -15,7 +15,7 @@ import {
 } from '../types';
 import { ClassifiedProviderError, failureResult } from '../shared/failure';
 import type { AppServerConnection, ParamsOf } from './app-server';
-import { withDeliveredCredentialConfig, type CodexLogin, type ThreadParams } from './login';
+import type { CodexLogin, ThreadParams } from './login';
 import { toolResponse, type buildCodexNativeTools } from './native-tools';
 import type { ServerNotification } from './protocol/ServerNotification';
 import type { McpServerStatusUpdatedNotification } from './protocol/v2/McpServerStatusUpdatedNotification';
@@ -26,13 +26,8 @@ import type { TokenUsageBreakdown } from './protocol/v2/TokenUsageBreakdown';
 import type { Turn } from './protocol/v2/Turn';
 import type { McpServerConnectionStatus } from './protocol/v2/McpServerConnectionStatus';
 import type { TurnError } from './protocol/v2/TurnError';
-import {
-  applyNodeScope,
-  checkThreadMcpScope,
-  declaredServers,
-  readCodexInventory,
-  readThreadMcpStatuses,
-} from './scope';
+import { declaredServers, readThreadMcpStatuses } from './scope';
+import { idAt, openThread } from './thread';
 import {
   MANAGED_CHATGPT_TOKEN_REJECTED,
   classifyTurnError,
@@ -229,26 +224,6 @@ function turnUsageOf(observation: TurnObservation): TokenUsage | undefined {
   );
 }
 
-/** A string at `value[key]`, or undefined: responses are read narrowly, not trusted whole. */
-function idAt(value: unknown, key: 'thread' | 'turn'): string | undefined {
-  const nested =
-    typeof value === 'object' && value !== null
-      ? (value as Record<string, unknown>)[key]
-      : undefined;
-  const id =
-    typeof nested === 'object' && nested !== null ? (nested as { id?: unknown }).id : undefined;
-  return typeof id === 'string' && id.length > 0 ? id : undefined;
-}
-
-/** The Codex home the app-server reports in its `initialize` response, for error messages. */
-function codexHomeOf(initializeResponse: unknown): string {
-  const home =
-    typeof initializeResponse === 'object' && initializeResponse !== null
-      ? (initializeResponse as { codexHome?: unknown }).codexHome
-      : undefined;
-  return typeof home === 'string' && home.length > 0 ? home : 'the Codex home';
-}
-
 export interface TurnRequest {
   abortSignal: AbortSignal | undefined;
   tools: ReturnType<typeof buildCodexNativeTools>;
@@ -261,6 +236,11 @@ export interface TurnRequest {
    * concurrent runs that continue one thread never write into it together.
    */
   forkSession: boolean;
+  /**
+   * The turn of `resumeSessionId` to continue from: in place while it is still the thread's
+   * latest turn and `forkSession` is unset, otherwise in a fork through it.
+   */
+  sessionCheckpoint: string | undefined;
   authoritativeCredential: boolean;
   threadParams: ThreadParams;
   turnParams: Omit<ParamsOf<'turn/start'>, 'threadId'>;
@@ -408,7 +388,13 @@ function* remainingResult(ids: TurnIds, observation: TurnObservation): Generator
   const tokens = reported && usage && usageAfter(reported.tokens, usage);
   if (!tokens) return;
   const { structuredOutput } = reported;
-  yield { type: 'result', sessionId: ids.threadId, tokens, structuredOutput };
+  yield {
+    type: 'result',
+    sessionId: ids.threadId,
+    sessionCheckpoint: ids.turnId,
+    tokens,
+    structuredOutput,
+  };
 }
 
 /** What `usage` holds beyond `reported`, axis by axis, or undefined when nothing grew. */
@@ -417,71 +403,6 @@ function usageAfter(reported: TokenUsage | undefined, usage: TokenUsage): TokenU
   for (const key of ['input', 'output', 'cacheRead', 'cacheWrite'] as const)
     later[key] = Math.max(0, (usage[key] ?? 0) - (reported?.[key] ?? 0));
   return Object.values(later).some(Boolean) ? later : undefined;
-}
-
-/**
- * Initialize the connection, log in, and start, continue or fork the thread with the
- * request's config, scoped to the node's plugins and MCP servers when it declares them.
- */
-async function openThread(request: TurnRequest): Promise<string> {
-  const { connection, nodePlugins, login, tools } = request;
-  const initialized = await connection.request('initialize', {
-    clientInfo: { name: 'archon', title: 'Archon', version: BUNDLED_VERSION },
-    // Host tools and external ChatGPT tokens both require Codex's experimental API.
-    capabilities:
-      tools.specs.length || login?.type === 'chatgptAuthTokens'
-        ? { experimentalApi: true, requestAttestation: false }
-        : null,
-  });
-  connection.notify('initialized');
-  if (login) {
-    // The credential stays in this process's memory: the app-server was started with the
-    // ephemeral credential store, so nothing reaches the user's CODEX_HOME.
-    await connection.request('account/login/start', login);
-  }
-
-  let { threadParams } = request;
-  if (request.authoritativeCredential) {
-    threadParams = await withDeliveredCredentialConfig(connection, request.cwd, threadParams);
-  }
-  let declared: string[] | undefined;
-  if (nodePlugins) {
-    const inventory = await readCodexInventory(connection, {
-      cwd: request.cwd,
-      plugins: nodePlugins,
-      codexHome: codexHomeOf(initialized),
-    });
-    const scope = applyNodeScope(threadParams.config ?? {}, inventory, nodePlugins);
-    threadParams = { ...threadParams, config: scope.config };
-    declared = scope.declared;
-  }
-  // A resumed or forked thread needs the same config: Codex does not store it with the
-  // thread, and a fork without it loads the user's MCP servers and plugins again.
-  const threadResponse = request.resumeSessionId
-    ? await connection.request(request.forkSession ? 'thread/fork' : 'thread/resume', {
-        threadId: request.resumeSessionId,
-        cwd: request.cwd,
-        ...threadParams,
-        excludeTurns: true,
-      })
-    : await connection.request('thread/start', {
-        cwd: request.cwd,
-        ...threadParams,
-        ...(tools.specs.length ? { dynamicTools: tools.specs } : {}),
-      });
-  const threadId = idAt(threadResponse, 'thread');
-  if (!threadId) throw new Error('Codex app-server returned a thread without an id');
-  request.onThread(threadId);
-  if (declared) await checkThreadMcpScope(connection, threadId, declared);
-  getLog().debug(
-    {
-      sessionIdPreview: sessionPreview(threadId),
-      resumed: !!request.resumeSessionId,
-      forked: !!request.resumeSessionId && request.forkSession,
-    },
-    'codex.thread_ready'
-  );
-  return threadId;
 }
 
 /** Serve host tool calls for the turn, then start it. */
@@ -689,7 +610,7 @@ async function* observeTurnCompleted(
   await request.connection.finishToolCalls();
   const usage = turnUsageOf(observation);
   for (const chunk of completeTurn(turn.status, turn.error, request, {
-    threadId: ids.threadId,
+    ...ids,
     usage,
     rateLimits: observation.rateLimits,
     lastAgentMessage: observation.lastAgentMessage,
@@ -727,8 +648,7 @@ function* completeTurn(
   status: Turn['status'],
   error: TurnError | null,
   request: TurnRequest,
-  state: {
-    threadId: string;
+  state: TurnIds & {
     usage: TokenUsage | undefined;
     rateLimits: RateLimitSnapshot | undefined;
     lastAgentMessage: string;
@@ -737,6 +657,8 @@ function* completeTurn(
   let result: ResultChunk;
   if (status === 'completed') {
     result = yield* completedResult(request.hasOutputFormat, state.lastAgentMessage);
+    // A later query continues from exactly this turn with `sessionCheckpoint`.
+    result.sessionCheckpoint = state.turnId;
   } else if (status === 'failed' && error) {
     result = failedResult(error, request, state.rateLimits);
   } else {

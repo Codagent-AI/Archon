@@ -689,6 +689,8 @@ function finalTurnRequestOf(
     ...request,
     tools: buildCodexNativeTools([]),
     forkSession: false,
+    // The final turn continues the tool turn's thread, which nothing else writes.
+    sessionCheckpoint: undefined,
     // The empty title scope: no plugin, app or MCP server, which the thread check enforces.
     nodePlugins: [],
     threadParams: {
@@ -741,6 +743,7 @@ function turnRequestOf(
     cwd,
     resumeSessionId: inputs.resumeThreadId,
     forkSession: requestOptions?.forkSession === true,
+    sessionCheckpoint: requestOptions?.sessionCheckpoint,
     authoritativeCredential: Object.values(CODEX_CREDENTIAL_ENV).some(
       key => requestOptions?.userCredentialEnvKeys?.includes(key) && requestOptions.env?.[key]
     ),

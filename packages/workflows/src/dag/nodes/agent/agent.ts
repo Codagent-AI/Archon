@@ -5,7 +5,6 @@ import { type NodeFailureKind } from '../../../schemas/node-execution';
 import { recordNodeState } from '../../../node-event-write';
 import type { SendQueryOptions, ProviderFailure } from '@archon/provider-contract';
 import type { AgentNode, EffortLevel } from '../../../schemas';
-import { isNodeContextResume } from '../../../schemas';
 import { createAttemptEventSequence } from '../../../provider-events';
 import { declaredOutputPathsFromSchema } from '../../../output-ref';
 import { STEP_IDLE_TIMEOUT_MS } from '../../../utils/idle-timeout';
@@ -17,7 +16,7 @@ import {
   aiNodeEnvironment,
   type RunLayersContext,
   type SessionCheckpoint,
-  type SessionResumeIntent,
+  type SessionContinuation,
 } from '../../run-context';
 import { substituteLoopBodyText } from '../../loop-scope';
 import { rejectedArtifactPointer } from '../../node-output';
@@ -47,7 +46,7 @@ export async function executeAgentNode(
   iteration?: number,
   checkpointSession?: SessionCheckpoint,
   listings?: InvocationListings,
-  resumeIntent: SessionResumeIntent = 'ordinary',
+  continuation: SessionContinuation = { kind: 'ordinary' },
   /** `$REJECTION_REASON` for an approval gate's rework prompt; undefined elsewhere. */
   rejectionReason?: string
 ): Promise<NodeExecutionResult> {
@@ -58,12 +57,7 @@ export async function executeAgentNode(
   // '' for the top-level DAG → identical to node.id. The in-process emitter payloads
   // below stay raw (node.id) — live SSE/CLI consumers key off those. See #2090.
   const stepName = stepNamePrefix + node.id;
-  const session: AttemptSession = {
-    resumeSessionId,
-    resumeIntent,
-    namedResumeSourceNodeId: isNodeContextResume(node.context) ? node.context.resume : undefined,
-    checkpointSession,
-  };
+  const session: AttemptSession = { resumeSessionId, continuation, checkpointSession };
   const commandPrompt =
     node.source.kind === 'command'
       ? await loadNodeCommandPrompt(
@@ -80,8 +74,7 @@ export async function executeAgentNode(
     resolvedTier,
     resolvedEffort,
     resumeSessionId,
-    resumeIntent,
-    namedResumeSourceNodeId: session.namedResumeSourceNodeId,
+    continuation,
     iteration,
     nodeContext,
   });
@@ -163,7 +156,7 @@ export async function executeAgentNode(
     idleTimeoutMs: node.idle_timeout ?? STEP_IDLE_TIMEOUT_MS,
     nodeKey,
     nodeStartTime,
-    staleResumeRetry: session.namedResumeSourceNodeId === undefined,
+    staleResumeRetry: continuation.kind === 'ordinary',
   };
 
   let result: WorkloadResult;
@@ -182,7 +175,6 @@ export async function executeAgentNode(
   const duration = Date.now() - nodeStartTime;
   getLog().info({ nodeId: node.id, durationMs: duration }, 'dag_node_completed');
 
-  const { namedResumeSourceNodeId } = session;
   const completed = await recordNodeState(
     { store: deps.store, logDir },
     finishNodeExecution(
@@ -207,8 +199,8 @@ export async function executeAgentNode(
         diagnostics: {
           ...execution.diagnostics,
           ...(node.output_type !== undefined ? { outputType: node.output_type } : {}),
-          ...(namedResumeSourceNodeId !== undefined
-            ? { sessionForked: resumeIntent !== 'owner-continuation' }
+          ...(continuation.kind === 'named'
+            ? { sessionForked: result.sessionId !== continuation.head.sessionId }
             : {}),
           ...(state.backgroundTasksIncomplete.length > 0
             ? { backgroundTasksIncomplete: state.backgroundTasksIncomplete }
@@ -229,9 +221,7 @@ export async function executeAgentNode(
 /** The session the attempt resumes, and what it must prove about the session it ends on. */
 interface AttemptSession {
   resumeSessionId: string | undefined;
-  resumeIntent: SessionResumeIntent;
-  /** The node named by `context: { resume }`, when this node resumes one. */
-  namedResumeSourceNodeId: string | undefined;
+  continuation: SessionContinuation;
   checkpointSession: SessionCheckpoint | undefined;
 }
 
@@ -262,10 +252,9 @@ function attemptQueryOptions(
   ctx: RunLayersContext,
   { nodeMcp, execution }: AgentBinding,
   nodeOptions: SendQueryOptions | undefined,
-  { resumeSessionId, resumeIntent }: AttemptSession,
+  { resumeSessionId, continuation }: AttemptSession,
   abortController: AbortController
 ): SendQueryOptions {
-  const shouldForkSession = resumeSessionId !== undefined && resumeIntent !== 'owner-continuation';
   return {
     ...nodeOptions,
     env: { ...nodeOptions?.env, ...aiNodeEnvironment(ctx, execution) },
@@ -273,11 +262,22 @@ function attemptQueryOptions(
       ? { nodeConfig: { ...nodeOptions?.nodeConfig, mcp: nodeMcp.path } }
       : {}),
     abortSignal: abortController.signal,
-    ...(resumeIntent === 'owner-continuation'
-      ? { forkSession: false }
-      : shouldForkSession
-        ? { forkSession: true }
-        : {}),
+    ...sessionQueryOptions(resumeSessionId, continuation),
+  };
+}
+
+/** Whether the provider forks the resumed session, and the checkpoint it continues from. */
+function sessionQueryOptions(
+  resumeSessionId: string | undefined,
+  continuation: SessionContinuation
+): Pick<SendQueryOptions, 'forkSession' | 'sessionCheckpoint'> {
+  if (continuation.kind === 'ordinary') {
+    return resumeSessionId !== undefined ? { forkSession: true } : {};
+  }
+  const { head, mode, forkRequested } = continuation;
+  return {
+    forkSession: forkRequested,
+    ...(mode === 'checkpoint' ? { sessionCheckpoint: head.checkpoint } : {}),
   };
 }
 
@@ -288,23 +288,26 @@ async function runWorkload(
   session: AttemptSession
 ): Promise<WorkloadResult> {
   const { node, ctx } = pc;
+  const { continuation } = session;
+  // Each reask pass of a named session starts again from the same point.
   await runUntilStructuredOutputValid(
     pc,
     state,
     finalPrompt,
     session.resumeSessionId,
-    session.resumeIntent === 'source-fork'
+    continuation.kind === 'named'
   );
 
   const failed = await finishTurnOutput(pc, state);
   if (failed !== undefined) return failed;
 
-  if (session.namedResumeSourceNodeId !== undefined) {
-    assertNamedSessionResumed(node.id, state, session, session.namedResumeSourceNodeId);
-  }
+  if (continuation.kind === 'named') assertNamedSessionResumed(node.id, state, continuation);
 
   if (state.sessionId !== undefined) {
-    await session.checkpointSession?.(state.sessionId);
+    await session.checkpointSession?.({
+      sessionId: state.sessionId,
+      checkpoint: state.sessionCheckpoint,
+    });
   }
 
   // Artifact pointers are validated here, before any node_completed row exists, so a
@@ -412,9 +415,9 @@ function emptyOutputFailure(pc: AgentPassContext, state: AgentAttemptState): Wor
 function assertNamedSessionResumed(
   nodeId: string,
   state: AgentAttemptState,
-  { resumeIntent, resumeSessionId }: AttemptSession,
-  sourceNodeId: string
+  continuation: Extract<SessionContinuation, { kind: 'named' }>
 ): void {
+  const { sourceNodeId, head, forkRequested } = continuation;
   const newSessionId = state.sessionId;
   if (state.resumed !== true) {
     throw new Error(
@@ -426,12 +429,7 @@ function assertNamedSessionResumed(
       `Node '${nodeId}' resumed '${sourceNodeId}' but the provider returned no branch session ID.`
     );
   }
-  if (resumeIntent === 'owner-continuation' && newSessionId !== resumeSessionId) {
-    throw new Error(
-      `Node '${nodeId}' did not continue its private owner session: the provider replaced the session ID.`
-    );
-  }
-  if (resumeIntent !== 'owner-continuation' && newSessionId === resumeSessionId) {
+  if (forkRequested && newSessionId === head.sessionId) {
     throw new Error(
       `Node '${nodeId}' did not create an immutable fork of '${sourceNodeId}': the provider reused the source session ID.`
     );

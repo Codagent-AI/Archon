@@ -6048,6 +6048,13 @@ export interface components {
           [key: string]: {
             sessionId: string;
             provider: string;
+            key?: string;
+            checkpoint?: string;
+            lineage?: {
+              key: string;
+              sessionId: string;
+              checkpoint?: string;
+            }[];
           };
         };
         bodySessionCursorAncestry?: {
@@ -6055,6 +6062,13 @@ export interface components {
             [key: string]: {
               sessionId: string;
               provider: string;
+              key?: string;
+              checkpoint?: string;
+              lineage?: {
+                key: string;
+                sessionId: string;
+                checkpoint?: string;
+              }[];
             };
           };
         };
@@ -6635,6 +6649,13 @@ export interface components {
             [key: string]: {
               sessionId: string;
               provider: string;
+              key?: string;
+              checkpoint?: string;
+              lineage?: {
+                key: string;
+                sessionId: string;
+                checkpoint?: string;
+              }[];
             };
           };
           bodySessionCursorAncestry?: {
@@ -6642,6 +6663,13 @@ export interface components {
               [key: string]: {
                 sessionId: string;
                 provider: string;
+                key?: string;
+                checkpoint?: string;
+                lineage?: {
+                  key: string;
+                  sessionId: string;
+                  checkpoint?: string;
+                }[];
               };
             };
           };
@@ -6665,6 +6693,13 @@ export interface components {
             [key: string]: {
               sessionId: string;
               provider: string;
+              key?: string;
+              checkpoint?: string;
+              lineage?: {
+                key: string;
+                sessionId: string;
+                checkpoint?: string;
+              }[];
             };
           };
           bodySessionCursorAncestry?: {
@@ -6672,6 +6707,13 @@ export interface components {
               [key: string]: {
                 sessionId: string;
                 provider: string;
+                key?: string;
+                checkpoint?: string;
+                lineage?: {
+                  key: string;
+                  sessionId: string;
+                  checkpoint?: string;
+                }[];
               };
             };
           };
@@ -6699,6 +6741,13 @@ export interface components {
             [key: string]: {
               sessionId: string;
               provider: string;
+              key?: string;
+              checkpoint?: string;
+              lineage?: {
+                key: string;
+                sessionId: string;
+                checkpoint?: string;
+              }[];
             };
           };
           bodySessionCursorAncestry?: {
@@ -6706,6 +6755,13 @@ export interface components {
               [key: string]: {
                 sessionId: string;
                 provider: string;
+                key?: string;
+                checkpoint?: string;
+                lineage?: {
+                  key: string;
+                  sessionId: string;
+                  checkpoint?: string;
+                }[];
               };
             };
           };

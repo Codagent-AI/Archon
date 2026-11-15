@@ -835,6 +835,7 @@ describe('CodexProvider', () => {
         {
           type: 'result',
           sessionId: THREAD_ID,
+          sessionCheckpoint: TURN_ID,
           tokens: { input: 120, output: 7, cacheRead: 100, cacheWrite: 3 },
         },
       ]);
@@ -1166,6 +1167,50 @@ describe('CodexProvider', () => {
       expect(new Set(['existing-thread', ...ids]).size).toBe(3);
     });
 
+    test('a completed turn reports its turn as the session checkpoint', async () => {
+      const { provider } = providerWith();
+      expect(resultOf(await run(provider)).sessionCheckpoint).toBe(TURN_ID);
+    });
+
+    test('a checkpoint that is still the thread’s latest turn continues the thread in place', async () => {
+      const { provider, server } = providerWith({ latestTurnId: 'turn-0' });
+      const result = resultOf(
+        await run(provider, { sessionCheckpoint: 'turn-0' }, 'existing-thread')
+      );
+      expect(server.processes[0].methods.slice(0, 3)).toEqual([
+        'initialize',
+        'thread/turns/list',
+        'thread/resume',
+      ]);
+      expect(paramsOf(server, 'thread/turns/list')).toEqual({
+        threadId: 'existing-thread',
+        limit: 1,
+        sortDirection: 'desc',
+        itemsView: 'notLoaded',
+      });
+      expect(result).toMatchObject({ sessionId: 'existing-thread', resumed: true });
+    });
+
+    test('a checkpoint behind the thread’s latest turn forks the thread through it', async () => {
+      const { provider, server } = providerWith({ latestTurnId: 'turn-9' });
+      const result = resultOf(
+        await run(provider, { sessionCheckpoint: 'turn-0' }, 'existing-thread')
+      );
+      expect(server.processes[0].methods).not.toContain('thread/resume');
+      expect(paramsOf(server, 'thread/fork')).toMatchObject({
+        threadId: 'existing-thread',
+        lastTurnId: 'turn-0',
+      });
+      expect(result).toMatchObject({ sessionId: 'existing-thread-fork-1', resumed: true });
+    });
+
+    test('a requested fork forks through the checkpoint without reading the thread', async () => {
+      const { provider, server } = providerWith({ latestTurnId: 'turn-0' });
+      await run(provider, { forkSession: true, sessionCheckpoint: 'turn-0' }, 'existing-thread');
+      expect(server.processes[0].methods).not.toContain('thread/turns/list');
+      expect(paramsOf(server, 'thread/fork')).toMatchObject({ lastTurnId: 'turn-0' });
+    });
+
     test('a thread that cannot be forked fails the turn without trying another way', async () => {
       const { provider, server } = providerWith({
         errors: { 'thread/fork': { code: -32600, message: 'no rollout found for thread id x' } },
@@ -1493,7 +1538,7 @@ describe('CodexProvider', () => {
       });
       expect(chunks).toEqual([
         { type: 'agent_thought_chunk', text: 'first\n\nsecond' },
-        { type: 'result', sessionId: THREAD_ID },
+        { type: 'result', sessionId: THREAD_ID, sessionCheckpoint: TURN_ID },
       ]);
     });
   });
@@ -2187,7 +2232,11 @@ describe('CodexProvider', () => {
       const chunks = await streamOf({
         notifications: [errorNotification('Reconnecting... 1/5', true), agentMessage('done')],
       });
-      expect(resultOf(chunks)).toEqual({ type: 'result', sessionId: THREAD_ID });
+      expect(resultOf(chunks)).toEqual({
+        type: 'result',
+        sessionId: THREAD_ID,
+        sessionCheckpoint: TURN_ID,
+      });
     });
 
     test('each retry Codex announces is a warning with its cause and no vendor text', async () => {
@@ -2226,7 +2275,7 @@ describe('CodexProvider', () => {
       });
       expect(chunks).toEqual([
         { type: 'agent_message_chunk', text: 'done' },
-        { type: 'result', sessionId: THREAD_ID },
+        { type: 'result', sessionId: THREAD_ID, sessionCheckpoint: TURN_ID },
       ]);
     });
 

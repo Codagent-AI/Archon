@@ -13,7 +13,7 @@ import {
   beginExecution,
   observeNodeCheckout,
   type RunLayersContext,
-  type SessionResumeIntent,
+  type SessionContinuation,
 } from '../../run-context';
 import { isInsideAny } from '../../checkout-guard';
 import { resolveNodeMcp, type NodeMcpResolution } from '../../provider-resolution';
@@ -27,9 +27,7 @@ export interface AgentBindingRequest {
   resolvedTier: TierName | undefined;
   resolvedEffort: EffortLevel | undefined;
   resumeSessionId: string | undefined;
-  resumeIntent: SessionResumeIntent;
-  /** The node named by `context: { resume }`, when it resumes one. */
-  namedResumeSourceNodeId: string | undefined;
+  continuation: SessionContinuation;
   /** Only inside a loop_group body; tags lifecycle rows with the iteration. */
   iteration: number | undefined;
   nodeContext: SendMessageContext;
@@ -53,7 +51,7 @@ export async function bindAgentNode(
   request: AgentBindingRequest
 ): Promise<AgentBinding> {
   const { deps, cwd, workflowSourceRoots } = ctx;
-  const { stepName, provider, namedResumeSourceNodeId } = request;
+  const { stepName, provider, continuation } = request;
   const homeMcpDirectory = readHomeMcpDirectory(node);
   const verifiedMcpFiles =
     homeMcpDirectory !== undefined
@@ -95,10 +93,10 @@ export async function bindAgentNode(
     }),
     diagnostics: {
       ...(request.iteration !== undefined ? { iteration: request.iteration } : {}),
-      ...(namedResumeSourceNodeId !== undefined
+      ...(continuation.kind === 'named'
         ? {
-            sessionSourceNodeId: namedResumeSourceNodeId,
-            sessionForkRequested: request.resumeIntent !== 'owner-continuation',
+            sessionSourceNodeId: continuation.sourceNodeId,
+            sessionForkRequested: continuation.forkRequested,
           }
         : {}),
       ...(nodeMcp.kind === 'unavailable' ? { mcpUnavailable: nodeMcp.record } : {}),

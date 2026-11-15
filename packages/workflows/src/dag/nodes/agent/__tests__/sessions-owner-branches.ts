@@ -204,8 +204,9 @@ export function setupAddressableTests() {
 export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddressableTests>) {
   for (const provider of ['claude', 'codex', 'pi']) {
     for (const fresh of [false, true]) {
-      it(`keeps the ${provider} owner branch across fresh reviews (fresh_context=${String(fresh)})`, async () => {
+      it(`forks the ${provider} owner's latest session across fresh reviews (fresh_context=${String(fresh)})`, async () => {
         let reviews = 0;
+        let owners = 0;
         mockSendQueryDag.mockImplementation(async function* (prompt, _cwd, session, options) {
           const done = prompt === 'review' && ++reviews === 3;
           yield {
@@ -214,7 +215,8 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
           };
           yield {
             type: 'result',
-            sessionId: prompt === 'source' ? 'S' : prompt === 'owner' ? 'O' : `R${reviews}`,
+            sessionId:
+              prompt === 'source' ? 'S' : prompt === 'owner' ? `O${++owners}` : `R${reviews}`,
             ...(options?.outputFormat ? { structuredOutput: { done } } : {}),
             ...(session ? { resumed: true } : {}),
           };
@@ -222,40 +224,149 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
         const store = await fixture.runAddressableWorkflow(fixture.ownerWorkflow(provider, fresh));
         expect(store.failWorkflowRun).not.toHaveBeenCalled();
         expect(store.completeWorkflowRun).toHaveBeenCalled();
+        // A provider without checkpoints forks the owner's previous iteration each time.
         expect(mockSendQueryDag.mock.calls.map(c => c[2])).toEqual([
           undefined,
           'S',
           undefined,
-          'O',
+          'O1',
           undefined,
-          'O',
+          'O2',
           undefined,
         ]);
         expect(
           mockSendQueryDag.mock.calls.filter(c => c[0] === 'owner').map(c => c[3]?.forkSession)
-        ).toEqual([true, false, false]);
+        ).toEqual([true, true, true]);
         const completed = (store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls
           .map(c => c[0])
           .filter(e => e.event_type === 'node_completed' && e.step_name === 'corrections.owner');
-        expect(completed.map(e => e.data.session_id)).toEqual(['O', 'O', 'O']);
-        expect(completed.map(e => e.data.session_forked)).toEqual([true, false, false]);
+        expect(completed.map(e => e.data.session_id)).toEqual(['O1', 'O2', 'O3']);
+        expect(completed.map(e => e.data.session_forked)).toEqual([true, true, true]);
         expect(store.upsertWorkflowRunNodeSession).toHaveBeenCalledWith({
           workflow_run_id: 'addressable-run',
           node_id: 'source',
           provider,
           provider_session_id: 'S',
+          session_path: [{ key: 'source', sessionId: 'S' }],
+        });
+        // The completed group hands the owner's latest session on, with its whole lineage.
+        expect(store.upsertWorkflowRunNodeSession).toHaveBeenLastCalledWith({
+          workflow_run_id: 'addressable-run',
+          node_id: 'corrections.owner',
+          provider,
+          provider_session_id: 'O3',
+          session_path: [
+            { key: 'source', sessionId: 'S' },
+            { key: 'corrections[1].owner', sessionId: 'O1' },
+            { key: 'corrections[2].owner', sessionId: 'O2' },
+            { key: 'corrections[3].owner', sessionId: 'O3' },
+          ],
         });
       });
     }
   }
 
-  it('restores private ownership from serialized interactive pause state in a new execution', async () => {
+  /**
+   * A provider that reports checkpoints: a call without `forkSession` continues the thread it
+   * resumes, a fork starts a new thread, and every turn reports its own checkpoint. The review
+   * reports `done` on its third run.
+   */
+  function mockCheckpointThreads(): void {
+    let reviews = 0;
+    let threads = 0;
+    let turns = 0;
+    mockSendQueryDag.mockImplementation(async function* (prompt, _cwd, session, options) {
+      const done = prompt === 'review' && ++reviews === 3;
+      const sessionId =
+        session === undefined || options?.forkSession === true ? `T${++threads}` : session;
+      yield {
+        type: 'agent_message_chunk',
+        text: prompt === 'review' ? JSON.stringify({ done }) : prompt,
+      };
+      yield {
+        type: 'result',
+        sessionId,
+        sessionCheckpoint: `turn${++turns}`,
+        ...(options?.outputFormat ? { structuredOutput: { done } } : {}),
+        ...(session ? { resumed: true } : {}),
+      };
+    });
+  }
+
+  function continuations(prompt: string): unknown[][] {
+    return mockSendQueryDag.mock.calls
+      .filter(c => c[0] === prompt)
+      .map(c => [c[2], c[3]?.forkSession, c[3]?.sessionCheckpoint]);
+  }
+
+  it('continues a checkpointed owner in place across iterations', async () => {
+    mockCheckpointThreads();
+    const store = await fixture.runAddressableWorkflow(fixture.ownerWorkflow('codex', true));
+    expect(store.failWorkflowRun).not.toHaveBeenCalled();
+    expect(continuations('owner')).toEqual([
+      ['T1', false, 'turn1'],
+      ['T1', false, 'turn2'],
+      ['T1', false, 'turn4'],
+    ]);
+    const completed = persistedEvents(store).filter(
+      e => e.event_type === 'node_completed' && e.step_name === 'corrections.owner'
+    );
+    expect(completed.map(e => e.data?.session_forked)).toEqual([false, false, false]);
+  });
+
+  it('hands a completed group owner to a later node that names its source', async () => {
+    for (const provider of ['codex', 'claude']) {
+      mockSendQueryDag.mockClear();
+      if (provider === 'codex') {
+        mockCheckpointThreads();
+      } else {
+        let reviews = 0;
+        let owners = 0;
+        mockSendQueryDag.mockImplementation(async function* (prompt, _cwd, session, options) {
+          const done = prompt === 'review' && ++reviews === 3;
+          yield { type: 'agent_message_chunk', text: prompt === 'review' ? '{}' : prompt };
+          yield {
+            type: 'result',
+            sessionId:
+              prompt === 'source'
+                ? 'S'
+                : prompt === 'owner'
+                  ? `O${++owners}`
+                  : prompt === 'final'
+                    ? 'F'
+                    : `R${reviews}`,
+            ...(options?.outputFormat ? { structuredOutput: { done } } : {}),
+            ...(session ? { resumed: true } : {}),
+          };
+        });
+      }
+      const nodes: DagNode[] = [
+        ...fixture.ownerWorkflow(provider, true),
+        {
+          id: 'final',
+          kind: 'agent',
+          provider,
+          depends_on: ['corrections'],
+          source: { kind: 'inline', prompt: 'final' },
+          context: { resume: 'source' },
+        },
+      ];
+      const store = await fixture.runAddressableWorkflow(nodes);
+      expect(store.failWorkflowRun).not.toHaveBeenCalled();
+      expect(continuations('final')).toEqual(
+        provider === 'codex' ? [['T1', false, 'turn6']] : [['O3', true, undefined]]
+      );
+    }
+  });
+
+  it('restores the owner session from serialized interactive pause state in a new execution', async () => {
     const nodes = fixture.ownerWorkflow('claude', true);
     const group = nodes[1];
     if (!group || group.kind !== 'loop_group') throw new Error('missing group');
     group.loop_group.interactive = true;
     group.loop_group.gate_message = 'Review';
     let reviews = 0;
+    let owners = 0;
     mockSendQueryDag.mockImplementation(async function* (prompt, _cwd, session, options) {
       const done = prompt === 'review' && ++reviews === 2;
       yield {
@@ -264,7 +375,7 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
       };
       yield {
         type: 'result',
-        sessionId: prompt === 'source' ? 'S' : prompt === 'owner' ? 'O' : `R${reviews}`,
+        sessionId: prompt === 'source' ? 'S' : prompt === 'owner' ? `O${++owners}` : `R${reviews}`,
         ...(options?.outputFormat ? { structuredOutput: { done } } : {}),
         ...(session ? { resumed: true } : {}),
       };
@@ -272,7 +383,14 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
     const store = await fixture.runAddressableWorkflow(nodes);
     const pause = (store.pauseWorkflowRun as Mock<IWorkflowStore['pauseWorkflowRun']>).mock
       .calls[0]?.[1];
-    expect(pause?.bodySessionCursors).toEqual({ owner: { sessionId: 'O', provider: 'claude' } });
+    expect(pause?.bodySessionCursors).toEqual({
+      owner: {
+        sessionId: 'O1',
+        provider: 'claude',
+        key: 'corrections[1].owner',
+        lineage: [{ key: 'source', sessionId: 'S' }],
+      },
+    });
     const resumedStore = createMockStore();
     await executeDagWorkflow(
       dagOptions({
@@ -290,6 +408,7 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
             node_id: 'source',
             provider: 'claude',
             provider_session_id: 'S',
+            session_path: null,
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           },
@@ -302,7 +421,7 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
       mockSendQueryDag.mock.calls.filter(c => c[0] === 'owner').map(c => [c[2], c[3]?.forkSession])
     ).toEqual([
       ['S', true],
-      ['O', false],
+      ['O1', true],
     ]);
     expect(mockSendQueryDag.mock.calls.filter(c => c[0] === 'review').map(c => c[2])).toEqual([
       undefined,
@@ -332,6 +451,7 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
               }),
         })
       );
+      let owners = 0;
       mockSendQueryDag.mockImplementation(async function* (prompt, _cwd, session, options) {
         yield {
           type: 'agent_message_chunk',
@@ -339,7 +459,7 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
         };
         yield {
           type: 'result',
-          sessionId: prompt === 'source' ? 'S' : prompt === 'owner' ? 'O' : 'R',
+          sessionId: prompt === 'source' ? 'S' : prompt === 'owner' ? `O${++owners}` : 'R',
           ...(options?.outputFormat ? { structuredOutput: { done: false } } : {}),
           ...(session ? { resumed: true } : {}),
         };
@@ -348,7 +468,15 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
       await fixture.runAddressableWorkflow(nodes, firstStore);
       const metadata = JSON.parse(JSON.stringify(firstStore.getState().metadata));
       const paused = boundary === 'gate' ? metadata.approval : metadata.wait;
-      expect(paused.bodySessionCursors).toEqual({ owner: { sessionId: 'O', provider: 'claude' } });
+      const source = { key: 'source', sessionId: 'S' };
+      expect(paused.bodySessionCursors).toEqual({
+        owner: {
+          sessionId: 'O1',
+          provider: 'claude',
+          key: 'corrections[1].owner',
+          lineage: [source],
+        },
+      });
       if (boundary === 'gate') paused.resolved = 'approved';
       if (boundary === 'time') paused.resumeAt = '2020-01-01T00:00:00.000Z';
       if (boundary === 'event') paused.signaledAt = new Date().toISOString();
@@ -361,6 +489,17 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
             workflow: { name: 'addressable', nodes },
             workflowRun: makeWorkflowRun('addressable-run', { metadata: state }),
             priorCompletedNodes: new Map([['source', { output: 'source', sessionId: 'S' }]]),
+            priorNodeSessions: [
+              {
+                workflow_run_id: 'addressable-run',
+                node_id: 'source',
+                provider: 'claude',
+                provider_session_id: 'S',
+                session_path: [source],
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              },
+            ],
           })
         );
         expect(store.failWorkflowRun).not.toHaveBeenCalled();
@@ -385,13 +524,23 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
           .map(c => [c[2], c[3]?.forkSession])
       ).toEqual([
         ['S', true],
-        ['O', false],
+        ['O1', true],
       ]);
       const second =
         boundary === 'gate'
           ? secondStore.getState().metadata.approval
           : secondStore.getState().metadata.wait;
-      expect(second).toMatchObject({ iteration: 2, bodySessionCursors: paused.bodySessionCursors });
+      expect(second).toMatchObject({
+        iteration: 2,
+        bodySessionCursors: {
+          owner: {
+            sessionId: 'O2',
+            provider: 'claude',
+            key: 'corrections[2].owner',
+            lineage: [source, { key: 'corrections[1].owner', sessionId: 'O1' }],
+          },
+        },
+      });
     });
   }
 
@@ -442,9 +591,11 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
       ];
       let reviews = 0;
       let innerBranches = 0;
+      let outerBranches = 0;
       mockSendQueryDag.mockImplementation(async function* (prompt, _cwd, session, options) {
         const done = prompt === 'inner-review' && ++reviews === 2;
         if (prompt === 'inner-owner' && options?.forkSession) innerBranches++;
+        if (prompt === 'outer-owner' && options?.forkSession) outerBranches++;
         yield {
           type: 'agent_message_chunk',
           text: prompt === 'inner-review' ? JSON.stringify({ done }) : prompt,
@@ -455,7 +606,7 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
             prompt === 'source'
               ? 'S'
               : prompt === 'outer-owner'
-                ? 'O'
+                ? `O${outerBranches}`
                 : prompt === 'inner-owner'
                   ? `I${innerBranches}`
                   : `R${reviews}`,
@@ -468,10 +619,24 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
       expect(firstStore.failWorkflowRun).not.toHaveBeenCalled();
       const metadata = JSON.parse(JSON.stringify(firstStore.getState().metadata));
       const pause = metadata.approval;
+      const source = { key: 'source', sessionId: 'S' };
+      const outerOwner = (iteration: number, sessionId: string) => ({
+        key: `outer[${String(iteration)}].owner`,
+        sessionId,
+      });
+      // The inner owner depends on the outer owner, which continued the source, so it
+      // continues the outer owner's conversation.
       expect(pause.bodySessionCursorAncestry).toEqual({
-        [JSON.stringify(['outer', []])]: { owner: { sessionId: 'O', provider: 'claude' } },
+        [JSON.stringify(['outer', []])]: {
+          owner: { provider: 'claude', ...outerOwner(1, 'O1'), lineage: [source] },
+        },
         [JSON.stringify(['outer.inner', [{ groupId: 'outer', iteration: 1 }]])]: {
-          owner: { sessionId: 'I1', provider: 'claude' },
+          owner: {
+            sessionId: 'I1',
+            provider: 'claude',
+            key: 'outer[1].inner[1].owner',
+            lineage: [source, outerOwner(1, 'O1')],
+          },
         },
       });
       pause.resolved = 'approved';
@@ -492,6 +657,7 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
                 node_id: 'source',
                 provider: 'claude',
                 provider_session_id: 'S',
+                session_path: null,
                 created_at: new Date().toISOString(),
                 updated_at: new Date().toISOString(),
               },
@@ -553,23 +719,25 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
           .map(c => [c[2], c[3]?.forkSession])
       ).toEqual([
         ['S', true],
-        ['O', false],
-        ['O', false],
+        ['O1', true],
+        ['O2', true],
       ]);
+      // The resumed inner group continues its own restored branch; the new inner invocation
+      // in outer iteration 2 continues that iteration's outer owner.
       expect(
         mockSendQueryDag.mock.calls
           .filter(c => c[0] === 'inner-owner')
           .map(c => [c[2], c[3]?.forkSession])
       ).toEqual([
-        ['S', true],
-        ['I1', false],
-        ['S', true],
+        ['O1', true],
+        ['I1', true],
+        ['O3', true],
       ]);
       expect(resumedStore.getState().metadata.approval).toMatchObject({
         bodySessionCursorAncestry: {
-          [JSON.stringify(['outer', []])]: { owner: { sessionId: 'O', provider: 'claude' } },
+          [JSON.stringify(['outer', []])]: { owner: { sessionId: 'O3', provider: 'claude' } },
           [JSON.stringify(['outer.inner', [{ groupId: 'outer', iteration: 2 }]])]: {
-            owner: { sessionId: 'I2', provider: 'claude' },
+            owner: { sessionId: 'I3', provider: 'claude' },
           },
         },
       });
@@ -583,25 +751,25 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
           .map(c => [c[2], c[3]?.forkSession])
       ).toEqual([
         ['S', true],
-        ['O', false],
-        ['O', false],
-        ['O', false],
+        ['O1', true],
+        ['O2', true],
+        ['O3', true],
       ]);
       expect(
         mockSendQueryDag.mock.calls
           .filter(c => c[0] === 'inner-owner')
           .map(c => [c[2], c[3]?.forkSession])
       ).toEqual([
-        ['S', true],
-        ['I1', false],
-        ['S', true],
-        ['I2', false],
+        ['O1', true],
+        ['I1', true],
+        ['O3', true],
+        ['I3', true],
       ]);
       expect(thirdStore.getState().metadata.approval).toMatchObject({
         iteration: 2,
         bodySessionCursorAncestry: {
           [JSON.stringify(['outer.inner', [{ groupId: 'outer', iteration: 2 }]])]: {
-            owner: { sessionId: 'I2', provider: 'claude' },
+            owner: { sessionId: 'I4', provider: 'claude' },
           },
         },
       });
@@ -685,10 +853,12 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
     expect(firstStore.failWorkflowRun).not.toHaveBeenCalled();
     expect(fixture.sameBodyConsumerCalls()).toEqual([]);
     const metadata = JSON.parse(JSON.stringify(firstStore.getState().metadata));
-    // The group tracks ancestry so the pause resumes inside iteration 1, but never
-    // persists the same-body consumer as an owner.
+    // The group tracks ancestry so the pause resumes inside iteration 1. It saves the
+    // source's session, which the re-run iteration replaces.
     expect(metadata.approval.bodySessionCursorAncestry).toEqual({
-      [JSON.stringify(['group', []])]: {},
+      [JSON.stringify(['group', []])]: {
+        a: { sessionId: 'A1', provider: 'claude', key: 'group[1].a', lineage: [] },
+      },
       [JSON.stringify(['group.inner', [{ groupId: 'group', iteration: 1 }]])]: {},
     });
     metadata.approval.resolved = 'approved';

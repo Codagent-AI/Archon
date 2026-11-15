@@ -6,7 +6,6 @@ import type {
   GateNode,
   LoopGroupNode,
   NodeOutput,
-  SessionCursor,
   WaitNode,
   WorkflowWaitContext,
 } from '../../../schemas';
@@ -19,6 +18,7 @@ import {
 import type { ModelAliasPreset, TierName } from '../../../model-validation';
 import { getLog } from '../../log';
 import type { RunLayersContext, SequentialSessionCursor } from '../../run-context';
+import type { NamedSession } from '../../named-session';
 
 export type LoopGroupBodyResult = NodeExecutionResult &
   (
@@ -33,6 +33,8 @@ export type LoopGroupBodyResult = NodeExecutionResult &
 export interface LoopGroupProgress {
   usage: Pick<NodeExecutionResult, 'costUsd' | 'costPartial' | 'tokens' | 'tokensUnknown'>;
   lastStartedIteration: number;
+  /** The body's named sessions, which a completed group hands to the nodes after it. */
+  bodySessionCursors?: ReadonlyMap<string, NamedSession>;
 }
 
 /**
@@ -52,9 +54,9 @@ export interface LoopGroupResume {
   isEscalatedGateResume: boolean;
   isEscalatedWaitResume: boolean;
   isLoopResume: boolean;
-  /** Named owner sessions of body nodes that resume a session context; undefined when none do. */
-  bodySessionCursors: Map<string, SessionCursor> | undefined;
-  bodySessionCursorAncestry: Map<string, Map<string, SessionCursor>>;
+  /** The latest named session of each body node on a session lineage; undefined when none is. */
+  bodySessionCursors: Map<string, NamedSession> | undefined;
+  bodySessionCursorAncestry: Map<string, Map<string, NamedSession>>;
   /** The iteration the run paused in. */
   resumeIteration: number;
   startIteration: number;

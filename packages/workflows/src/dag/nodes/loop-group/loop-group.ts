@@ -11,6 +11,7 @@ import { type ModelAliasPreset, type TierName } from '../../../model-validation'
 import { getLog } from '../../log';
 import { RunSourceUnreadableError } from '../../node-source';
 import { beginExecution, type RunLayersContext } from '../../run-context';
+import { pathOf, type NamedSession } from '../../named-session';
 import type { LoopGroupBodyResult, LoopGroupRun, LoopGroupProgress } from './loop-group-state';
 import {
   completeEscalatedResume,
@@ -76,6 +77,9 @@ export async function executeLoopGroupNode(
       workflowTier,
       workflowPreset
     );
+    if (result.state === 'completed' && progress.bodySessionCursors !== undefined) {
+      await handOnBodySessions(ctx, node, progress.bodySessionCursors);
+    }
   } catch (error) {
     // These interruptions leave lifecycle ownership to run recovery.
     if (
@@ -102,6 +106,30 @@ export async function executeLoopGroupNode(
     );
   }
   return recordGroupResult(ctx, execution, result);
+}
+
+/**
+ * Hands a completed group's named body sessions to the nodes after it, as sessions the group
+ * produced: each body node's latest one, keyed by record key. Each body node's session row is
+ * rewritten to match, so a workflow resume restores what this pass handed on. Within an
+ * enclosing loop_group they reach only the rest of the enclosing iteration.
+ */
+async function handOnBodySessions(
+  ctx: RunLayersContext,
+  node: LoopGroupNode,
+  bodySessionCursors: ReadonlyMap<string, NamedSession>
+): Promise<void> {
+  if (ctx.nodeSessionHandles === undefined) return;
+  for (const [bodyNodeId, session] of bodySessionCursors) {
+    ctx.nodeSessionHandles.set(session.key, { ...session, producer: node.id });
+    await ctx.deps.store.upsertWorkflowRunNodeSession({
+      workflow_run_id: ctx.workflowRun.id,
+      node_id: `${ctx.stepNamePrefix}${node.id}.${bodyNodeId}`,
+      provider: session.provider,
+      provider_session_id: session.sessionId,
+      session_path: pathOf(session),
+    });
+  }
 }
 
 async function recordGroupResult(
@@ -200,6 +228,7 @@ async function executeLoopGroupBody(
     resume: readLoopGroupResume(ctx, node, bodyNodes, stepName, progress),
   };
   const { resume } = run;
+  progress.bodySessionCursors = resume.bodySessionCursors;
 
   const finalized = await finalizeGroupOnBareApprove(run);
   if (finalized !== undefined) return finalized;

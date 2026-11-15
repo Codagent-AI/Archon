@@ -10,7 +10,7 @@ import { executeWorkflowNode } from './nodes/workflow/workflow';
 import { executeComposeFanOutNode } from './nodes/compose-fan-out/compose-fan-out';
 import { runExecNode } from './nodes/exec/exec';
 import { dispatchAgentNode } from './nodes/agent/dispatch';
-import { snapshotBodySessionCursorAncestry } from './pause';
+import { snapshotBodySessionCursorAncestry, snapshotBodySessionCursors } from './pause';
 import type { DagNode } from '../schemas';
 import { writeInvocationListings } from '../invocation-listings';
 import { assistantModelDefaults, resolveNodeModelScope } from '../node-model-resolution';
@@ -60,7 +60,7 @@ export async function dispatchNode(
         resolvedLoopModel,
         resolvedLoopTier,
         resolvedLoopEffort,
-        sessionCheckpoint(ctx, node, loopProvider)
+        sessionCheckpoint(ctx, node, loopProvider, undefined)
       );
       // Loop nodes run every iteration on the same resolved provider, so the
       // result session (if any) is attributable to loopProvider — tag it so a
@@ -132,9 +132,7 @@ export async function dispatchNode(
               iteration: loopFrame.iteration,
               sessionId: ctx.lastSequentialSession?.sessionId ?? null,
               sessionProvider: ctx.lastSequentialSession?.provider ?? null,
-              ...(ctx.bodySessionCursors !== undefined
-                ? { bodySessionCursors: Object.fromEntries(ctx.bodySessionCursors) }
-                : {}),
+              ...snapshotBodySessionCursors(ctx.bodySessionCursors),
               ...snapshotBodySessionCursorAncestry(ctx.bodySessionCursorAncestry),
             }
       );

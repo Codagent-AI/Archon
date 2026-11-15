@@ -226,9 +226,12 @@ export {
   workflowRunOutcomeSchema,
   workflowWaitContextSchema,
   sessionCursorSchema,
+  namedSessionPointSchema,
+  namedSessionCursorSchema,
   bodySessionCursorsSchema,
   bodySessionCursorAncestrySchema,
   type BodySessionCursorAncestry,
+  type BodySessionCursors,
   scheduledWorkflowResumeSchema,
   workflowStepStatusSchema,
   nodeStateSchema,
@@ -357,7 +360,7 @@ export {
   type ToolCallAttention,
 } from './workflow-run';
 
-export type { SessionCursor } from './workflow-run';
+export type { SessionCursor, NamedSessionPoint, NamedSessionCursor } from './workflow-run';
 
 export { canSuspend, isInteractiveSink } from './node-suspension';
 

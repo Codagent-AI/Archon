@@ -4,6 +4,7 @@ import {
   pauseGateRespectingExternalTransition,
   sendPauseNotice,
   snapshotBodySessionCursorAncestry,
+  snapshotBodySessionCursors,
 } from '../../pause';
 import { gateReworkNode } from '../../../gate-rework';
 import { finishNodeExecution, executionMetadata } from '../../../node-execution';
@@ -145,7 +146,7 @@ export async function executeApprovalNode(
         iteration,
         undefined, // synthetic on_reject node never carries a session checkpoint
         listings,
-        'ordinary',
+        { kind: 'ordinary' },
         rejectionReason
       )
     );
@@ -256,9 +257,7 @@ function buildApprovalContext(
           iteration: bodyGateOwner.iteration,
           sessionId: ctx.lastSequentialSession?.sessionId ?? null,
           sessionProvider: ctx.lastSequentialSession?.provider ?? null,
-          ...(ctx.bodySessionCursors !== undefined
-            ? { bodySessionCursors: Object.fromEntries(ctx.bodySessionCursors) }
-            : {}),
+          ...snapshotBodySessionCursors(ctx.bodySessionCursors),
           ...snapshotBodySessionCursorAncestry(ctx.bodySessionCursorAncestry),
         }
       : {}),

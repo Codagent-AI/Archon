@@ -23,13 +23,19 @@ import type {
   WorkflowNodeSession,
   WorkflowRun,
 } from '../schemas';
-import { isNodeContextResume, type NodeContext } from '../schemas';
 import type { DagResumeSnapshot, PersistedNodeOutput, PriorFailedNode } from '../store';
 import type { RunBudgetLedger } from '../run-budget';
 import type { ModelAliasPreset, ResolvedAiProfile, TierName } from '../model-validation';
 import type { ExecutionContext, ProviderCapabilities, TokenUsage } from '@archon/provider-contract';
 import type { LoopBodyScope } from './loop-scope';
 import type { RunChildWorkflowFn } from './child-run';
+import {
+  namedSessionKey,
+  pathOf,
+  type NamedSession,
+  type NamedSessionHandle,
+  type NamedSessionMode,
+} from './named-session';
 
 /** Workflow-level provider options. The provider options have node-level
  *  counterparts and are resolved as `node.X ?? workflowLevelOptions.X`. Two do
@@ -51,10 +57,30 @@ export interface WorkflowLevelOptions {
 }
 
 export type SequentialSessionCursor = SessionCursor;
-export type SessionResumeIntent = 'ordinary' | 'source-fork' | 'owner-continuation';
+/**
+ * How one attempt continues the session it resumes. `ordinary` is the sequential cursor or a
+ * persisted scope session; `named` is the conversation `context: { resume }` names.
+ */
+export type SessionContinuation =
+  | { kind: 'ordinary' }
+  | {
+      kind: 'named';
+      /** The node named in `context: { resume }`. */
+      sourceNodeId: string;
+      head: NamedSession;
+      mode: NamedSessionMode;
+      /** The attempt asks the provider for a fork, not an in-place continuation. */
+      forkRequested: boolean;
+    };
+
+/** The session an attempt ended on, and the provider's marker for its last turn. */
+export interface EndedSession {
+  sessionId: string;
+  checkpoint: string | undefined;
+}
 
 /** Makes a provider session durable before its node becomes authoritatively complete. */
-export type SessionCheckpoint = (sessionId: string) => Promise<void>;
+export type SessionCheckpoint = (ended: EndedSession) => Promise<void>;
 
 /** Per-node result surfaced by a runLayers layer closure. `sessionProvider` tags which
  *  resolved provider created `output.sessionId` (session-producing paths only). */
@@ -62,6 +88,8 @@ export interface LayerNodeResult {
   nodeId: string;
   output: NodeExecutionResult;
   sessionProvider?: string;
+  /** The named session a completed agent node on a session lineage ended on. */
+  namedSession?: NamedSession;
 }
 
 /**
@@ -224,10 +252,24 @@ export interface RunLayersContext extends RunInputs, RunDerived {
    * those nodes replay their failure instead of running again. Undefined on a retry.
    */
   replayedFailures?: ReadonlyMap<string, PriorFailedNode>;
-  nodeSessionHandles?: Map<string, SequentialSessionCursor>;
-  namedResumeSourceIds?: ReadonlySet<string>;
-  bodySessionCursors?: Map<string, SessionCursor>;
-  bodySessionCursorAncestry?: Map<string, Map<string, SessionCursor>>;
+  /**
+   * The named sessions this level's nodes may continue: its own nodes' sessions as they
+   * complete, and, in a loop_group body, the sessions of the group's dependencies.
+   */
+  nodeSessionHandles?: Map<string, NamedSessionHandle>;
+  /** Nodes that name a session in `context: { resume }` or are named by one. */
+  namedSessionNodeIds?: ReadonlySet<string>;
+  /**
+   * In a loop_group body, each body node's latest named session across the group's
+   * iterations, saved with the group's pauses.
+   */
+  bodySessionCursors?: Map<string, NamedSession>;
+  bodySessionCursorAncestry?: Map<string, Map<string, NamedSession>>;
+  /**
+   * Sessions a running attempt is continuing in place, run-wide, so a second attempt that
+   * would continue the same session forks it instead.
+   */
+  sessionsContinuedInPlace?: Set<string>;
   /** Sequential-session threading cursor (mutated by runLayers). Provider-tagged so the
    *  session is only threaded into nodes that resolve to the SAME provider (#1992). */
   lastSequentialSession: SequentialSessionCursor | undefined;
@@ -326,35 +368,30 @@ export function aiNodeEnvironment(
 }
 
 /**
- * The checkpoint through which a node another node names in `context: { resume }` records
- * its provider session as soon as the provider reports it. Undefined for every other node.
+ * The checkpoint through which a node that names a session in `context: { resume }`, or is
+ * named by one, records its provider session as soon as the provider reports it, with the
+ * lineage it continued. Undefined for every other node.
  */
 export function sessionCheckpoint(
   ctx: RunLayersContext,
   node: DagNode,
-  provider: string
+  provider: string,
+  head: NamedSession | undefined
 ): SessionCheckpoint | undefined {
-  if (ctx.nodeSessionHandles === undefined || ctx.namedResumeSourceIds?.has(node.id) !== true) {
+  if (ctx.nodeSessionHandles === undefined || ctx.namedSessionNodeIds?.has(node.id) !== true) {
     return undefined;
   }
-  return async (sessionId: string): Promise<void> => {
+  const key = namedSessionKey(ctx.loopGroupPath, node.id);
+  return async ({ sessionId, checkpoint }: EndedSession): Promise<void> => {
     await ctx.deps.store.upsertWorkflowRunNodeSession({
       workflow_run_id: ctx.workflowRun.id,
       node_id: ctx.stepNamePrefix + node.id,
       provider,
       provider_session_id: sessionId,
+      session_path: [
+        ...(head === undefined ? [] : pathOf(head)),
+        { key, sessionId, ...(checkpoint !== undefined ? { checkpoint } : {}) },
+      ],
     });
   };
-}
-
-/**
- * A loop_group body node that resumes a source outside its own body owns a private
- * session cursor continued across iterations. A same-body source is forked afresh in
- * every iteration, so its consumer never owns a cursor.
- */
-export function ownsBodySessionCursor(
-  node: { context?: NodeContext },
-  bodyNodeIds: ReadonlySet<string>
-): boolean {
-  return isNodeContextResume(node.context) && !bodyNodeIds.has(node.context.resume);
 }

@@ -268,6 +268,7 @@ The tables defined in `migrations/000_combined.sql` are prefixed with `remote_ag
 - **`remote_agent_workflow_run_node_sessions`** - Private provider session handles within a workflow run
   - Keyed by `(workflow_run_id, node_id)`; deleted with the owning run
   - Stores the provider and session ID for same-run session lineage; excluded from run and event APIs
+  - `session_path` holds the named-session lineage ending with the row's own point, as JSON text; `NULL` for rows written before the column existed or by a writer that records none
 
 - **`remote_agent_workflow_node_sessions`** - Per-node provider session IDs persisted across workflow re-runs
   - Opt-in via `persist_session`; keyed by `(workflow_name, node_id, scope_key, provider)`

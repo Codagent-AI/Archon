@@ -5,6 +5,7 @@
 import { join as joinPath } from 'path';
 import { requireProvider, sessionPreview } from '@archon/provider-contract';
 import type { AgentNode } from '../../../schemas';
+import type { NodeExecutionResult } from '../../../node-record-serialization';
 import {
   isNodeContextResume,
   nodeUsesPersistedScope,
@@ -25,19 +26,36 @@ import {
   assertCheckoutUntouched,
 } from '../../checkout-guard';
 import {
+  type EndedSession,
   type LayerNodeResult,
   type PersistScope,
   type RunLayersContext,
-  type SessionResumeIntent,
+  type SessionCheckpoint,
+  type SessionContinuation,
   sessionCheckpoint,
 } from '../../run-context';
+import {
+  completedNamedSession,
+  namedSessionKey,
+  startingPoint,
+  upstreamOf,
+  type NamedSession,
+  type NamedSessionMode,
+} from '../../named-session';
 import { executeAgentNode } from './agent';
 
-interface SessionSelection {
+type SessionSelection =
+  | { kind: 'ordinary'; resumeSessionId: string | undefined }
+  | { kind: 'named'; sourceNodeId: string; head: NamedSession; mode: NamedSessionMode };
+
+/** The session a selection resumes, and the named session it continues, if any. */
+function selectedStart(session: SessionSelection): {
   resumeSessionId: string | undefined;
-  resumeIntent: SessionResumeIntent;
-  /** The node names its session source with `context: { resume }`. */
-  named: boolean;
+  head: NamedSession | undefined;
+} {
+  return session.kind === 'named'
+    ? { resumeSessionId: session.head.sessionId, head: session.head }
+    : { resumeSessionId: session.resumeSessionId, head: undefined };
 }
 
 export async function dispatchAgentNode(
@@ -61,7 +79,9 @@ export async function dispatchAgentNode(
   });
 
   const session = selectSession(ctx, node, provider, isParallelLayer);
-  let resumeSessionId = session.resumeSessionId;
+  const start = selectedStart(session);
+  const { head } = start;
+  let { resumeSessionId } = start;
 
   // Strictly opt-in: on only when the node sets persist_session (or inherits the
   // workflow-level persist_sessions default) and doesn't opt out via context:'fresh'.
@@ -79,7 +99,7 @@ export async function dispatchAgentNode(
       );
     }
     const persistScope = ctx.persistScope;
-    if (persistScope && !session.named) {
+    if (persistScope && session.kind === 'ordinary') {
       resumeSessionId =
         (await persistedSessionToContinue(
           ctx,
@@ -97,6 +117,8 @@ export async function dispatchAgentNode(
   // `mutates_checkout: false` (#2771) is asserted OUTSIDE the retry loop:
   // the snapshot covers every attempt, and a violation fails the node
   // without offering retry another chance to mutate.
+  const recorded: { ended?: EndedSession } = {};
+  const recordEnded = recordingEnded(sessionCheckpoint(ctx, node, provider, head), recorded);
   const checkoutExcludes = checkoutSnapshotExcludes(ctx.artifactsDir, ctx.stateDir, ctx.logDir);
   const treeBefore = await snapshotGuardedNode(ctx, node, checkoutExcludes);
   const retriedOutput = await runNodeRetryLoop(
@@ -113,21 +135,23 @@ export async function dispatchAgentNode(
         // artifacts published in the interval, and never reuses the
         // listing handed to AI-configuration substitution above.
         const attemptListings = await writeInvocationListings(ctx);
-        return executeAgentNode(
-          ctx,
-          node,
-          reserve,
-          provider,
-          nodeOptions,
-          resumeSessionId,
-          resolvedNodeModel,
-          resolvedTier,
-          resolvedEffort,
-          ctx.stepNamePrefix,
-          iteration,
-          sessionCheckpoint(ctx, node, provider),
-          attemptListings,
-          session.resumeIntent
+        return continuingSession(ctx, session, continuation =>
+          executeAgentNode(
+            ctx,
+            node,
+            reserve,
+            provider,
+            nodeOptions,
+            resumeSessionId,
+            resolvedNodeModel,
+            resolvedTier,
+            resolvedEffort,
+            ctx.stepNamePrefix,
+            iteration,
+            recordEnded,
+            attemptListings,
+            continuation
+          )
         );
       }),
     { state: 'failed', output: '', error: 'Node did not execute' },
@@ -153,7 +177,7 @@ export async function dispatchAgentNode(
   // mistaken for a normal resumed one — but do NOT re-run: a replay would
   // only repeat the same fresh run at double the cost and side effects.
   if (
-    !session.named &&
+    session.kind === 'ordinary' &&
     resumeSessionId !== undefined &&
     output.state === 'completed' &&
     output.resumed === false
@@ -232,7 +256,80 @@ export async function dispatchAgentNode(
     }
   }
 
-  return { nodeId: node.id, output, sessionProvider: provider };
+  return {
+    nodeId: node.id,
+    output,
+    sessionProvider: provider,
+    ...namedSessionOf(ctx, node, provider, output, head, recorded.ended),
+  };
+}
+
+/**
+ * The named session a completed node on a session lineage hands to later nodes: the session
+ * its completed attempt ended on, continuing the point it started from.
+ */
+function namedSessionOf(
+  ctx: RunLayersContext,
+  node: AgentNode,
+  provider: string,
+  output: NodeExecutionResult,
+  head: NamedSession | undefined,
+  ended: EndedSession | undefined
+): { namedSession?: NamedSession } {
+  if (output.state !== 'completed' || ended === undefined) return {};
+  if (ended.sessionId !== output.sessionId) {
+    throw new Error(
+      `Node '${node.id}' completed on a session other than the one it recorded for later nodes.`
+    );
+  }
+  return {
+    namedSession: completedNamedSession(
+      namedSessionKey(ctx.loopGroupPath, node.id),
+      provider,
+      ended,
+      head
+    ),
+  };
+}
+
+/**
+ * The checkpoint callback for each attempt, which also keeps the session the latest attempt
+ * recorded in `recorded`; the completed attempt records last.
+ */
+function recordingEnded(
+  checkpoint: SessionCheckpoint | undefined,
+  recorded: { ended?: EndedSession }
+): SessionCheckpoint | undefined {
+  if (checkpoint === undefined) return undefined;
+  return async ended => {
+    await checkpoint(ended);
+    recorded.ended = ended;
+  };
+}
+
+/**
+ * Run one attempt on the session it continues. A checkpoint attempt continues its starting
+ * point in place unless another running attempt already holds that session in place; the
+ * claim lasts until the attempt ends, so a retry starts from the same point.
+ */
+async function continuingSession<T>(
+  ctx: RunLayersContext,
+  session: SessionSelection,
+  attempt: (continuation: SessionContinuation) => Promise<T>
+): Promise<T> {
+  if (session.kind === 'ordinary') return attempt({ kind: 'ordinary' });
+  const { head, mode, sourceNodeId } = session;
+  const named = { kind: 'named', sourceNodeId, head, mode } as const;
+  const held = ctx.sessionsContinuedInPlace;
+  if (mode !== 'checkpoint' || held === undefined || held.has(head.sessionId)) {
+    return attempt({ ...named, forkRequested: true });
+  }
+  held.add(head.sessionId);
+  try {
+    return await attempt({ ...named, forkRequested: false });
+  } finally {
+    held.delete(head.sessionId);
+  }
 }
 
 /**
@@ -271,50 +368,55 @@ function selectSession(
   const isFreshSequential = isParallelLayer || node.context === 'fresh' || composedBlockEntry;
   const cursor = ctx.lastSequentialSession;
   if (isFreshSequential || cursor === undefined) {
-    return { resumeSessionId: undefined, resumeIntent: 'ordinary', named: false };
+    return { kind: 'ordinary', resumeSessionId: undefined };
   }
   if (cursor.provider === provider) {
-    return { resumeSessionId: cursor.sessionId, resumeIntent: 'ordinary', named: false };
+    return { kind: 'ordinary', resumeSessionId: cursor.sessionId };
   }
   getLog().info(
     { nodeId: node.id, provider, cursorProvider: cursor.provider },
     'dag.session_provider_boundary_fresh'
   );
-  return { resumeSessionId: undefined, resumeIntent: 'ordinary', named: false };
+  return { kind: 'ordinary', resumeSessionId: undefined };
 }
 
+/**
+ * The point a node naming `sourceNodeId` continues from (see `named-session.ts`), and how.
+ * A provider that reports checkpoints continues it in place where it can. Any other provider
+ * forks it: it cannot fork a session at a point, so continuing one in place could hand a
+ * concurrent fork of the same session this attempt's unfinished turn.
+ */
 function selectNamedSession(
   ctx: RunLayersContext,
   node: AgentNode,
   provider: string,
   sourceNodeId: string
 ): SessionSelection {
-  const ownerCursor = ctx.bodySessionCursors?.get(node.id);
-  const resumeIntent: SessionResumeIntent =
-    ownerCursor !== undefined ? 'owner-continuation' : 'source-fork';
-  const sourceHandle = ownerCursor ?? ctx.nodeSessionHandles?.get(sourceNodeId);
-  if (sourceHandle === undefined) {
+  const source = ctx.nodeSessionHandles?.get(sourceNodeId);
+  if (source === undefined || source.sessionId.trim() === '') {
     throw new Error(
       `Node '${node.id}' cannot resume '${sourceNodeId}': the completed source has no available provider session.`
     );
   }
-  if (sourceHandle.sessionId.trim() === '') {
+  if (source.provider !== provider) {
     throw new Error(
-      `Node '${node.id}' cannot resume '${sourceNodeId}': the completed source has no available provider session.`
+      `Node '${node.id}' cannot resume '${sourceNodeId}': source provider '${source.provider}' does not match resolved provider '${provider}'.`
     );
   }
-  if (sourceHandle.provider !== provider) {
-    throw new Error(
-      `Node '${node.id}' cannot resume '${sourceNodeId}': source provider '${sourceHandle.provider}' does not match resolved provider '${provider}'.`
-    );
-  }
+  const upstream = upstreamOf(ctx.layers).get(node.id) ?? new Set<string>();
+  const visible = [...(ctx.nodeSessionHandles?.values() ?? [])].filter(
+    handle => handle.producer === undefined || upstream.has(handle.producer)
+  );
+  // Before this node completes in this iteration, its entry is from an earlier one.
+  const head = startingPoint(source, visible, ctx.bodySessionCursors?.get(node.id));
   const caps = requireProvider(ctx.deps.providers, provider).capabilities;
-  if (!caps.sessionResume || (resumeIntent === 'source-fork' && caps.sessionFork !== true)) {
+  if (!caps.sessionResume || caps.sessionFork !== true) {
     throw new Error(
       `Node '${node.id}' cannot resume '${sourceNodeId}': resolved provider '${provider}' does not support immutable session forks.`
     );
   }
-  return { resumeSessionId: sourceHandle.sessionId, resumeIntent, named: true };
+  const mode: NamedSessionMode = head.checkpoint !== undefined ? 'checkpoint' : 'fork';
+  return { kind: 'named', sourceNodeId, head, mode };
 }
 
 /**

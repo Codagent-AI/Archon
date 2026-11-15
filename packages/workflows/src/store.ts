@@ -25,6 +25,7 @@ import type {
   WorkflowNodeSession,
   WorkflowRunNodeSession,
 } from './schemas';
+import type { NamedSessionPoint } from './schemas';
 import type { IStateDocumentStore } from './state-document-store';
 import type { AttentionAnswerWrite, AttentionLabelWrite } from './store/attention-writes';
 import type { PauseCursor, WorkflowResumeCursor } from './store/continuation-cursors';
@@ -139,6 +140,8 @@ export interface IWorkflowRunNodeSessionStore {
     node_id: string;
     provider: string;
     provider_session_id: string;
+    /** The named-session lineage ending with this row's own point; a writer that records none leaves it out, which stores null. */
+    session_path?: readonly NamedSessionPoint[];
   }): Promise<void>;
 }
 

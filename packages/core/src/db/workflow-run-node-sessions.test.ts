@@ -38,6 +38,7 @@ describe('workflow-run-node-sessions', () => {
         node_id: 'scope',
         provider: 'claude',
         provider_session_id: 'session-1',
+        session_path: null,
         created_at: '2026-08-19T00:00:00.000Z',
         updated_at: '2026-08-19T00:00:00.000Z',
       },
@@ -61,7 +62,8 @@ describe('workflow-run-node-sessions', () => {
     const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
     expect(sql).toContain('ON CONFLICT (workflow_run_id, node_id)');
     expect(sql).toContain('provider_session_id = EXCLUDED.provider_session_id');
-    expect(params).toEqual(['run-1', 'scope', 'pi', 'session-2']);
+    expect(params).toEqual(['run-1', 'scope', 'pi', 'session-2', null]);
+    expect(sql).toContain('session_path = EXCLUDED.session_path');
   });
 
   test('rethrows checkpoint failures', async () => {

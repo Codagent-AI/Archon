@@ -15,11 +15,13 @@ import {
   isApprovalContext,
   isWorkflowWaitContext,
   type BodySessionCursorAncestry,
+  type BodySessionCursors,
 } from '../schemas';
 import type { GatePauseEventInput } from '../store';
 import { executionClaim, WorkflowRunPauseConflictError } from '../store';
 import { getLog } from './log';
 import { type RunLayersContext } from './run-context';
+import { cursorOfNamedSession, type NamedSession } from './named-session';
 
 export interface ContainerPauseReceipt {
   kind: 'container_pause';
@@ -263,6 +265,21 @@ async function recoverGatePauseConflict(
   return undefined;
 }
 
+function cursorsOf(cursors: ReadonlyMap<string, NamedSession>): BodySessionCursors {
+  return Object.fromEntries(
+    [...cursors].map(([nodeId, session]) => [nodeId, cursorOfNamedSession(session)])
+  );
+}
+
+/** A loop_group body's named sessions as a pause saves them. */
+export function snapshotBodySessionCursors(
+  cursors: ReadonlyMap<string, NamedSession> | undefined
+): {
+  bodySessionCursors?: BodySessionCursors;
+} {
+  return cursors === undefined ? {} : { bodySessionCursors: cursorsOf(cursors) };
+}
+
 export function snapshotBodySessionCursorAncestry(
   ancestry: RunLayersContext['bodySessionCursorAncestry']
 ): { bodySessionCursorAncestry?: BodySessionCursorAncestry } {
@@ -270,7 +287,7 @@ export function snapshotBodySessionCursorAncestry(
     ? {}
     : {
         bodySessionCursorAncestry: Object.fromEntries(
-          [...ancestry].map(([key, cursors]) => [key, Object.fromEntries(cursors)])
+          [...ancestry].map(([key, cursors]) => [key, cursorsOf(cursors)])
         ),
       };
 }

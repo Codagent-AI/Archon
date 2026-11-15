@@ -27,13 +27,9 @@ import { safeSendMessage } from '../platform-messages';
 import { getLog } from './log';
 import { incrementalLoopUsage, sumTokenUsage } from './usage';
 import { RunSourceUnreadableError, settledValuesOrThrow } from './node-source';
-import {
-  beginExecution,
-  ownsBodySessionCursor,
-  type LayerNodeResult,
-  type RunLayersContext,
-} from './run-context';
+import { beginExecution, type LayerNodeResult, type RunLayersContext } from './run-context';
 import { resolveRunInputs } from './references';
+import { namedSessionKey } from './named-session';
 import { formatPersistedNodeOutput, persistedExecutionOutput } from './node-output';
 import { isCheckoutGuarded } from './checkout-guard';
 import { checkComposedBlockBoundaries, checkTriggerRule } from './trigger-rule';
@@ -582,7 +578,6 @@ async function aggregateLayerResults(
   isParallelLayer: boolean
 ): Promise<boolean> {
   const nodeById = new Map(layer.map(n => [n.id, n]));
-  const bodyNodeIds = new Set(ctx.layers.flat().map(n => n.id));
   let layerHadFailure = false;
   for (const result of layerResults) {
     if (result.status !== 'fulfilled') continue;
@@ -590,7 +585,7 @@ async function aggregateLayerResults(
     const node = nodeById.get(nodeId);
     addNodeUsage(ctx, result.value);
     ctx.nodeOutputs.set(nodeId, output);
-    recordSessionCursors(ctx, result.value, node, bodyNodeIds);
+    recordSessionCursors(ctx, result.value);
     if (output.state === 'completed' && node?.output_type) {
       await writeTypedArtifacts(ctx, node, node.output_type, output.output);
     }
@@ -641,20 +636,23 @@ function completedSession({ output, sessionProvider }: LayerNodeResult): Session
   return { sessionId: output.sessionId, provider: sessionProvider };
 }
 
-function recordSessionCursors(
-  ctx: RunLayersContext,
-  result: LayerNodeResult,
-  node: DagNode | undefined,
-  bodyNodeIds: ReadonlySet<string>
-): void {
+/**
+ * Records the named session a completed node on a session lineage ended on, for the nodes
+ * that may continue it: later nodes at this level and, in a loop_group body, later
+ * iterations and the nodes after the group. A source without an agent dispatch (a plain
+ * `loop:` node) starts its own lineage.
+ */
+function recordSessionCursors(ctx: RunLayersContext, result: LayerNodeResult): void {
   const session = completedSession(result);
-  if (session === undefined) return;
-  if (ctx.nodeSessionHandles !== undefined && ctx.namedResumeSourceIds?.has(result.nodeId)) {
-    ctx.nodeSessionHandles.set(result.nodeId, session);
-  }
-  if (node && ownsBodySessionCursor(node, bodyNodeIds)) {
-    ctx.bodySessionCursors?.set(result.nodeId, session);
-  }
+  if (session === undefined || ctx.nodeSessionHandles === undefined) return;
+  if (ctx.namedSessionNodeIds?.has(result.nodeId) !== true) return;
+  const named = result.namedSession ?? {
+    key: namedSessionKey(ctx.loopGroupPath, result.nodeId),
+    ...session,
+    lineage: [],
+  };
+  ctx.nodeSessionHandles.set(result.nodeId, { ...named, producer: result.nodeId });
+  ctx.bodySessionCursors?.set(result.nodeId, named);
 }
 
 // Typed artifact: when a node declares `output_type`, persist its output
