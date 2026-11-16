@@ -12,6 +12,8 @@
  * never by timing: a sibling that happens to finish first is not a dependency.
  */
 import type { DagNode, NamedSessionCursor, NamedSessionPoint } from '../schemas';
+import { isLoopGroupNode } from '../schemas';
+import { resolvedBodyNodes } from '../graph-plan';
 
 /** A completed node's session as a later node continues it. */
 export interface NamedSession {
@@ -201,6 +203,30 @@ export function upstreamOf(
   for (const id of nodes.keys()) visit(id);
   upstreamByLevel.set(layers, upstream);
   return upstream;
+}
+
+/**
+ * The ids under which a loop_group keeps its body's named sessions, each with its node: every
+ * body node on a session lineage, and every such node of a nested loop_group behind the
+ * nested group's id (`inner.owner`). A completed nested group's sessions are the enclosing
+ * group's too, so its later iterations and the nodes after it continue them.
+ */
+export function bodySessionIds(
+  bodyNodes: readonly DagNode[],
+  namedSessionNodeIds: ReadonlySet<string>
+): Map<string, DagNode> {
+  const ids = new Map<string, DagNode>();
+  for (const node of bodyNodes) {
+    if (namedSessionNodeIds.has(node.id)) ids.set(node.id, node);
+    if (!isLoopGroupNode(node)) continue;
+    for (const [id, nested] of bodySessionIds(
+      resolvedBodyNodes(node.loop_group),
+      namedSessionNodeIds
+    )) {
+      ids.set(`${node.id}.${id}`, nested);
+    }
+  }
+  return ids;
 }
 
 /**

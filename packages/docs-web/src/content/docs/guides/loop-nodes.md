@@ -930,9 +930,11 @@ owner then continues the session of the node the included workflow returns (its
 `returns:` node, or its first sink), which must itself be a command, prompt, or plain
 `loop:` node. An include whose returned node produces no session is rejected at load,
 as is an include with `fan_out:`, which has no single session. A source in the same body works differently; see
-[Same-iteration sessions](#same-iteration-sessions). Nested groups keep separate body
-sessions for each enclosing invocation. Nested pauses retain every enclosing group's
-body sessions and resume within the paused enclosing iteration before advancing.
+[Same-iteration sessions](#same-iteration-sessions). A completed nested group's body
+sessions become the enclosing group's, so the nested group's next invocation continues
+each body node's branch, and a node after the enclosing group continues them too. Nested
+pauses retain every enclosing group's body sessions and resume within the paused
+enclosing iteration before advancing.
 The resolved provider must match the source and support session resume and forks.
 Missing context fails the node rather than starting a new conversation.
 

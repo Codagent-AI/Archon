@@ -545,7 +545,7 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
   }
 
   for (const boundary of ['gate', 'interactive'] as const) {
-    it(`restores enclosing owners after a nested ${boundary} and scopes new inner invocations`, async () => {
+    it(`restores enclosing owners after a nested ${boundary} and carries inner branches into new invocations`, async () => {
       const nodes = fixture.ownerWorkflow('claude', true);
       const outer = nodes[1];
       if (outer?.kind !== 'loop_group') throw new Error('missing outer group');
@@ -722,8 +722,9 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
         ['O1', true],
         ['O2', true],
       ]);
-      // The resumed inner group continues its own restored branch; the new inner invocation
-      // in outer iteration 2 continues that iteration's outer owner.
+      // The resumed inner group continues its own restored branch. Resuming re-ran the outer
+      // owner, so the inner owner's branch and the outer owner's diverged, and the new inner
+      // invocation in outer iteration 2 keeps to the inner owner's branch from iteration 1.
       expect(
         mockSendQueryDag.mock.calls
           .filter(c => c[0] === 'inner-owner')
@@ -731,7 +732,7 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
       ).toEqual([
         ['O1', true],
         ['I1', true],
-        ['O3', true],
+        ['I2', true],
       ]);
       expect(resumedStore.getState().metadata.approval).toMatchObject({
         bodySessionCursorAncestry: {
@@ -762,7 +763,7 @@ export function registerOwnerBranchTests(fixture: ReturnType<typeof setupAddress
       ).toEqual([
         ['O1', true],
         ['I1', true],
-        ['O3', true],
+        ['I2', true],
         ['I3', true],
       ]);
       expect(thirdStore.getState().metadata.approval).toMatchObject({

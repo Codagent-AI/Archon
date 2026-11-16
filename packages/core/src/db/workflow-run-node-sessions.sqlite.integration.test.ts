@@ -56,6 +56,7 @@ test('a session path round-trips and an upsert without one stores null', async (
 });
 
 test('stored text that is not a valid path fails naming the run and node', async () => {
+  await upsertWorkflowRunNodeSession({ ...base, provider_session_id: 's1' });
   for (const text of ['not json', '{"key":"a"}', '[{"key":"a"}]']) {
     await getDatabase().query(
       'UPDATE remote_agent_workflow_run_node_sessions SET session_path = ? WHERE workflow_run_id = ?',

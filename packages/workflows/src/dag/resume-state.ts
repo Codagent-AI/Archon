@@ -21,7 +21,7 @@ import { resolvedBodyNodes } from '../graph-plan';
 import type { PersistedNodeOutput } from '../store';
 import { getLog } from './log';
 import type { PersistScope } from './run-context';
-import type { NamedSessionHandle } from './named-session';
+import { bodySessionIds, type NamedSessionHandle } from './named-session';
 
 export interface RestoredRunState {
   nodeOutputs: Map<string, NodeOutput>;
@@ -54,8 +54,8 @@ export function restoreRunState(
 
 /**
  * The named sessions of the nodes a prior pass completed: each top-level node's own, and the
- * latest session of each body node of a completed loop_group, which steps after the group
- * may continue. The completed-output snapshot is the authority for which nodes survived the
+ * latest session of each body node of a completed loop_group, nested groups' included, which
+ * steps after the group may continue. The completed-output snapshot is the authority for which nodes survived the
  * previous pass, so a handle is never resurrected without its completion. A body row an
  * older binary wrote has no lineage and was never continued after its group, so it stays out.
  */
@@ -74,9 +74,12 @@ function restoreNamedSessions(
       handles.set(node.id, { ...restoredSession(row, node.id), producer: node.id });
     }
     if (!isLoopGroupNode(node)) continue;
-    for (const body of resolvedBodyNodes(node.loop_group)) {
-      const bodyRow = rowsById.get(`${node.id}.${body.id}`);
-      if (bodyRow?.session_path == null || !namedSessionNodeIds.has(body.id)) continue;
+    for (const bodyId of bodySessionIds(
+      resolvedBodyNodes(node.loop_group),
+      namedSessionNodeIds
+    ).keys()) {
+      const bodyRow = rowsById.get(`${node.id}.${bodyId}`);
+      if (bodyRow?.session_path == null) continue;
       const session = restoredSession(bodyRow, bodyRow.node_id);
       handles.set(session.key, { ...session, producer: node.id });
     }

@@ -111,8 +111,9 @@ export async function executeLoopGroupNode(
 /**
  * Hands a completed group's named body sessions to the nodes after it, as sessions the group
  * produced: each body node's latest one, keyed by record key. Each body node's session row is
- * rewritten to match, so a workflow resume restores what this pass handed on. Within an
- * enclosing loop_group they reach only the rest of the enclosing iteration.
+ * rewritten to match, so a workflow resume restores what this pass handed on. Inside an
+ * enclosing loop_group they also join the enclosing group's body sessions under this group's
+ * id, so its later iterations, its pauses and the nodes after it carry them on.
  */
 async function handOnBodySessions(
   ctx: RunLayersContext,
@@ -122,6 +123,7 @@ async function handOnBodySessions(
   if (ctx.nodeSessionHandles === undefined) return;
   for (const [bodyNodeId, session] of bodySessionCursors) {
     ctx.nodeSessionHandles.set(session.key, { ...session, producer: node.id });
+    ctx.bodySessionCursors?.set(`${node.id}.${bodyNodeId}`, session);
     await ctx.deps.store.upsertWorkflowRunNodeSession({
       workflow_run_id: ctx.workflowRun.id,
       node_id: `${ctx.stepNamePrefix}${node.id}.${bodyNodeId}`,

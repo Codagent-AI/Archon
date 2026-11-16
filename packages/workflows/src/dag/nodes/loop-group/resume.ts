@@ -27,6 +27,7 @@ import {
   isNodeContextResume,
 } from '../../../schemas';
 import {
+  bodySessionIds,
   namedSessionKey,
   namedSessionOfCursor,
   pathOf,
@@ -250,10 +251,11 @@ function enclosingPauseFrameOf(
 }
 
 /**
- * Restore the latest named session of each body node on a session lineage, from the pause
- * this run resumes or an enclosing group's pause frame. Undefined when no body node is on
- * one; otherwise a map, empty when nothing was saved, so a nested pause resumes inside the
- * paused iteration.
+ * Restore the latest named session of each body node on a session lineage (see
+ * {@link bodySessionIds}), from the pause this run resumes or an enclosing group's pause
+ * frame. Undefined when no body node is on one; otherwise a map, so a nested pause resumes
+ * inside the paused iteration. A fresh invocation starts with what the group's earlier
+ * invocations left in the enclosing group.
  */
 function restoreBodySessionCursors(
   ctx: RunLayersContext,
@@ -264,11 +266,8 @@ function restoreBodySessionCursors(
     enclosingPauseFrame: { iteration: number } | undefined;
   }
 ): Map<string, NamedSession> | undefined {
-  const participants = new Map(
-    bodyNodes.filter(n => ctx.namedSessionNodeIds?.has(n.id) === true).map(n => [n.id, n])
-  );
+  const participants = bodySessionIds(bodyNodes, ctx.namedSessionNodeIds ?? new Set());
   if (participants.size === 0) return undefined;
-  const bodySessionCursors = new Map<string, NamedSession>();
   if (shape.rawLoopWait && !shape.isEscalatedWaitResume) {
     throw new Error(
       `Loop group '${node.id}' cannot restore named body sessions: invalid loop wait state.`
@@ -280,8 +279,9 @@ function restoreBodySessionCursors(
     restoredCursors === undefined &&
     shape.enclosingPauseFrame === undefined
   ) {
-    return bodySessionCursors;
+    return earlierInvocationSessions(ctx, node, participants);
   }
+  const bodySessionCursors = new Map<string, NamedSession>();
   const parsed = bodySessionCursorsSchema.safeParse(
     restoredCursors ?? pausedBodySessionCursors(shape)
   );
@@ -297,6 +297,25 @@ function restoreBodySessionCursors(
     bodySessionCursors.set(id, restoredBodySession(ctx, node, bodyNode, cursor));
   }
   return bodySessionCursors;
+}
+
+/**
+ * The body sessions a nested group's earlier invocations handed to the enclosing group, under
+ * this group's id, so each body node keeps to its own branch across enclosing iterations.
+ * Empty for a group no loop_group encloses.
+ */
+function earlierInvocationSessions(
+  ctx: RunLayersContext,
+  node: LoopGroupNode,
+  participants: ReadonlyMap<string, DagNode>
+): Map<string, NamedSession> {
+  const prefix = `${node.id}.`;
+  const sessions = new Map<string, NamedSession>();
+  for (const [id, session] of ctx.bodySessionCursors ?? []) {
+    const bodyId = id.slice(prefix.length);
+    if (id.startsWith(prefix) && participants.has(bodyId)) sessions.set(bodyId, session);
+  }
+  return sessions;
 }
 
 /**

@@ -56,9 +56,16 @@ export function registerOwnerResumeTests(fixture: ReturnType<typeof setupAddress
       groupId: 'wrapper',
       iteration: 2,
     });
-    expect(metadata.approval.bodySessionCursorAncestry[JSON.stringify(['wrapper', []])]).toEqual(
-      {}
-    );
+    // Wrapper iteration 1's completed group handed its body sessions to the wrapper.
+    expect(metadata.approval.bodySessionCursorAncestry[JSON.stringify(['wrapper', []])]).toEqual({
+      'group.a': { key: 'wrapper[1].group[1].a', sessionId: 'A1', provider: 'claude', lineage: [] },
+      'group.b': {
+        key: 'wrapper[1].group[1].b',
+        sessionId: 'B1',
+        provider: 'claude',
+        lineage: [{ key: 'wrapper[1].group[1].a', sessionId: 'A1' }],
+      },
+    });
     metadata.approval.resolved = 'approved';
     const resumedStore = createEscalationStore('addressable-run');
     await executeDagWorkflow(
@@ -464,7 +471,7 @@ export function registerOwnerResumeTests(fixture: ReturnType<typeof setupAddress
       ['O3', true],
     ]);
     // Each owner records its session as it completes; each completed inner group rewrites
-    // its owner's row, and the completed outer group rewrites the source's.
+    // its owner's row, and the completed outer group rewrites the source's and the owner's.
     expect(
       (
         store.upsertWorkflowRunNodeSession as Mock<IWorkflowStore['upsertWorkflowRunNodeSession']>
@@ -479,7 +486,108 @@ export function registerOwnerResumeTests(fixture: ReturnType<typeof setupAddress
       ['outer.inner.owner', 'O4'],
       ['outer.inner.owner', 'O4'],
       ['outer.local', 'L2'],
+      ['outer.inner.owner', 'O4'],
     ]);
+  });
+
+  it('carries a nested owner across enclosing iterations and past the enclosing group', async () => {
+    let owners = 0;
+    mockSendQueryDag.mockImplementation(async function* (prompt, _cwd, session) {
+      const sessionId = prompt === 'source' ? 'S' : prompt === 'owner' ? `O${++owners}` : 'F';
+      yield { type: 'agent_message_chunk', text: sessionId };
+      yield { type: 'result', sessionId, ...(session ? { resumed: true } : {}) };
+    });
+    const nodes: DagNode[] = [
+      { id: 'source', kind: 'agent', source: { kind: 'inline', prompt: 'source' } },
+      {
+        id: 'outer',
+        kind: 'loop_group',
+        depends_on: ['source'],
+        loop_group: {
+          max_iterations: 2,
+          fresh_context: false,
+          until_bash: 'test $inner.output = O2',
+          nodes: [
+            {
+              id: 'inner',
+              kind: 'loop_group',
+              loop_group: {
+                max_iterations: 1,
+                fresh_context: false,
+                until_bash: 'exit 0',
+                nodes: [
+                  {
+                    id: 'owner',
+                    kind: 'agent',
+                    source: { kind: 'inline', prompt: 'owner' },
+                    context: { resume: 'source' },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      {
+        id: 'final',
+        kind: 'agent',
+        depends_on: ['outer'],
+        source: { kind: 'inline', prompt: 'final' },
+        context: { resume: 'source' },
+      },
+    ];
+    const calls = (prompt: string): unknown[][] =>
+      mockSendQueryDag.mock.calls.filter(c => c[0] === prompt).map(c => [c[2], c[3]?.forkSession]);
+    const store = await fixture.runAddressableWorkflow(nodes);
+    expect(store.failWorkflowRun).not.toHaveBeenCalled();
+    // Outer iteration 2's owner continues iteration 1's, and `final` the latest one.
+    expect(calls('owner')).toEqual([
+      ['S', true],
+      ['O1', true],
+    ]);
+    expect(calls('final')).toEqual([['O2', true]]);
+    const upsert = store.upsertWorkflowRunNodeSession as Mock<
+      IWorkflowStore['upsertWorkflowRunNodeSession']
+    >;
+    expect(upsert).toHaveBeenCalledWith({
+      workflow_run_id: 'addressable-run',
+      node_id: 'outer.inner.owner',
+      provider: 'claude',
+      provider_session_id: 'O2',
+      session_path: [
+        { key: 'source', sessionId: 'S' },
+        { key: 'outer[1].inner[1].owner', sessionId: 'O1' },
+        { key: 'outer[2].inner[1].owner', sessionId: 'O2' },
+      ],
+    });
+
+    // A workflow resume after `final` failed restores the nested owner from its row.
+    const now = new Date().toISOString();
+    const rows = new Map(
+      upsert.mock.calls.map(([row]) => [
+        row.node_id,
+        {
+          ...row,
+          session_path: row.session_path ? [...row.session_path] : null,
+          created_at: now,
+          updated_at: now,
+        },
+      ])
+    );
+    rows.delete('final');
+    mockSendQueryDag.mockClear();
+    const resumed = await fixture.runAddressableWorkflow(
+      nodes,
+      createMockStore(),
+      new Map([
+        ['source', { output: 'S', sessionId: 'S' }],
+        ['outer', { output: 'O2' }],
+      ]),
+      [...rows.values()]
+    );
+    expect(resumed.failWorkflowRun).not.toHaveBeenCalled();
+    expect(calls('owner')).toEqual([]);
+    expect(calls('final')).toEqual([['O2', true]]);
   });
 
   it('restarts each reask pass of a Pi owner from its starting point', async () => {
