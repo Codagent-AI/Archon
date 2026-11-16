@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { dagNodeSchema } from '../schemas';
+import { bodySessionCursorsSchema, dagNodeSchema } from '../schemas';
 import {
   completedNamedSession,
   cursorOfNamedSession,
@@ -53,7 +53,42 @@ describe('startingPoint', () => {
       provider: 'codex',
       checkpoint: 'B1',
       lineage: [{ key: 'S', sessionId: 'thread', checkpoint: 's1' }],
+      merged: [
+        { key: 'C', sessionId: 'fork-c', checkpoint: 'C1' },
+        { key: 'D', sessionId: 'fork-d', checkpoint: 'D1' },
+      ],
     });
+  });
+
+  it('continues the node that resolved diverged branches', () => {
+    const a = continued('lens-a', source);
+    const b = continued('lens-b', source, 'fork-b');
+    const synthesis = continued('synthesis', startingPoint(source, [a, b]), 'fork-s');
+    expect(startingPoint(source, [a, b, synthesis])).toBe(synthesis);
+    const report = continued('report', synthesis);
+    expect(startingPoint(source, [a, b, synthesis, report])).toBe(report);
+    // A branch the resolving node never saw still diverges from it.
+    const late = continued('late', a, 'fork-late');
+    expect(startingPoint(source, [a, b, synthesis, late]).key).toBe('S');
+  });
+
+  it('keeps what the resolved branches had resolved', () => {
+    const a = continued('a', source);
+    const b = continued('b', source, 'fork-b');
+    const ab = continued('ab', startingPoint(source, [a, b]), 'fork-ab');
+    const c = continued('c', source, 'fork-c');
+    const abc = continued('abc', startingPoint(source, [a, b, ab, c]), 'fork-abc');
+    expect(startingPoint(source, [a, b, ab, c, abc])).toBe(abc);
+  });
+
+  it('keeps every resolution a shared point recorded on any branch', () => {
+    const a = continued('a', source);
+    const b = continued('b', source, 'fork-b');
+    // `merger` resolved a and b at the source; `plain` continued the source directly.
+    const merger = continued('merger', startingPoint(source, [a, b]), 'fork-m');
+    const plain = continued('plain', source, 'fork-p');
+    const both = continued('both', startingPoint(source, [plain, merger]), 'fork-both');
+    expect(startingPoint(source, [a, b, merger, plain, both])).toBe(both);
   });
 
   it('keeps a body node on its own branch when the continuers diverge', () => {
@@ -61,7 +96,20 @@ describe('startingPoint', () => {
     const b = continued('G[1].b', source, 'thread-b');
     expect(startingPoint(source, [a, b], a)).toBe(a);
     expect(startingPoint(source, [a, b], b)).toBe(b);
-    expect(startingPoint(source, [a, b])).toEqual({ ...source });
+    expect(startingPoint(source, [a, b])).toEqual({
+      ...source,
+      merged: [
+        { key: 'G[1].a', sessionId: 'thread-a', checkpoint: 'G[1].a1' },
+        { key: 'G[1].b', sessionId: 'thread-b', checkpoint: 'G[1].b1' },
+      ],
+    });
+  });
+
+  it('moves a body node past a later node that resolved its branch', () => {
+    const a = continued('G[1].a', source, 'thread-a');
+    const b = continued('G[1].b', source, 'thread-b');
+    const fix = continued('G[1].fix', startingPoint(source, [a, b]), 'thread-fix');
+    expect(startingPoint(source, [a, b, fix], a)).toBe(fix);
   });
 
   it('follows a sibling that continued the node’s own session', () => {
@@ -95,6 +143,10 @@ describe('named session records', () => {
   it('round-trips a session through a pause cursor', () => {
     const b = continued('G[1].b', source);
     expect(namedSessionOfCursor(cursorOfNamedSession(b), 'unused')).toEqual(b);
+    const c = continued('G[1].c', source, 'thread-c');
+    const merged = continued('G[1].m', startingPoint(source, [b, c]), 'thread-m');
+    const saved = bodySessionCursorsSchema.parse({ m: cursorOfNamedSession(merged) });
+    expect(namedSessionOfCursor(saved.m, 'unused')).toEqual(merged);
   });
 
   it('gives a cursor saved without lineage the fallback key and an empty lineage', () => {

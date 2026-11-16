@@ -121,10 +121,20 @@ export type SessionCursor = z.infer<typeof sessionCursorSchema>;
  * iterations), its provider session, and the provider's marker for the step's last turn,
  * when the provider reports one.
  */
-export const namedSessionPointSchema = z.object({
+export const namedSessionBranchSchema = z.object({
   key: z.string().min(1),
   sessionId: z.string().min(1),
   checkpoint: z.string().min(1).optional(),
+});
+export type NamedSessionBranch = z.infer<typeof namedSessionBranchSchema>;
+
+/**
+ * A point a step continued from because it was the last point several branches shared also
+ * lists the points of those branches (`merged`): the step resolved them, so a later step that
+ * continues the step is not sent back to this point by them.
+ */
+export const namedSessionPointSchema = namedSessionBranchSchema.extend({
+  merged: z.array(namedSessionBranchSchema).optional(),
 });
 export type NamedSessionPoint = z.infer<typeof namedSessionPointSchema>;
 

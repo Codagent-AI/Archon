@@ -32,9 +32,9 @@ import type { RunChildWorkflowFn } from './child-run';
 import {
   namedSessionKey,
   pathOf,
+  type CheckpointedSession,
   type NamedSession,
   type NamedSessionHandle,
-  type NamedSessionMode,
 } from './named-session';
 
 /** Workflow-level provider options. The provider options have node-level
@@ -61,17 +61,18 @@ export type SequentialSessionCursor = SessionCursor;
  * How one attempt continues the session it resumes. `ordinary` is the sequential cursor or a
  * persisted scope session; `named` is the conversation `context: { resume }` names.
  */
-export type SessionContinuation =
-  | { kind: 'ordinary' }
-  | {
-      kind: 'named';
-      /** The node named in `context: { resume }`. */
-      sourceNodeId: string;
-      head: NamedSession;
-      mode: NamedSessionMode;
-      /** The attempt asks the provider for a fork, not an in-place continuation. */
-      forkRequested: boolean;
-    };
+export type SessionContinuation = { kind: 'ordinary' } | NamedContinuation;
+
+/**
+ * How an attempt continues its named starting point: in place from the point's checkpoint,
+ * which the provider still forks when the point is no longer its session's latest turn, or
+ * as a fork of the point's session (through the checkpoint, when the point has one).
+ */
+export type NamedContinuation = {
+  kind: 'named';
+  /** The node named in `context: { resume }`. */
+  sourceNodeId: string;
+} & ({ inPlace: true; head: CheckpointedSession } | { inPlace: false; head: NamedSession });
 
 /** The session an attempt ended on, and the provider's marker for its last turn. */
 export interface EndedSession {

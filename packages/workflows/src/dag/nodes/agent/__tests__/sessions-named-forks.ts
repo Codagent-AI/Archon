@@ -270,6 +270,14 @@ export function registerNamedForkTests(fixture: ReturnType<typeof setupAddressab
         context: { resume: 'source' },
         depends_on: ['lens-a', 'lens-b'],
       },
+      {
+        id: 'report',
+        kind: 'agent',
+        provider: 'codex',
+        source: { kind: 'inline', prompt: 'report' },
+        context: { resume: 'source' },
+        depends_on: ['synthesis'],
+      },
     ]);
     expect(store.failWorkflowRun).not.toHaveBeenCalled();
     const lenses = [...continuations('lens-a'), ...continuations('lens-b')];
@@ -278,6 +286,49 @@ export function registerNamedForkTests(fixture: ReturnType<typeof setupAddressab
     expect(lenses.map(call => call[1]).sort()).toEqual([false, true]);
     // The lenses diverged, so the synthesis continues the last point they share.
     expect(continuations('synthesis')).toEqual([['T1', false, 'turn1']]);
+    // The synthesis resolved the lenses' branches, so the report continues the synthesis.
+    expect(continuations('report')).toEqual([['T1', false, 'turn4']]);
+  });
+
+  it('forks a source that later runs continue, so its session never holds a consumer turn', async () => {
+    const counters = { threads: 0, turns: 0 };
+    mockSendQueryDag.mockImplementation(async function* (prompt, _cwd, session, options) {
+      yield { type: 'agent_message_chunk', text: prompt };
+      yield checkpointResult(session, options?.forkSession, counters);
+    });
+    const consumer = (id: string, dependsOn: string): DagNode => ({
+      id,
+      kind: 'agent',
+      provider: 'codex',
+      source: { kind: 'inline', prompt: id },
+      context: { resume: 'source' },
+      depends_on: [dependsOn],
+    });
+    const store = await fixture.runAddressableWorkflow([
+      {
+        id: 'source',
+        kind: 'agent',
+        provider: 'codex',
+        source: { kind: 'inline', prompt: 'source' },
+        persist_session: true,
+      },
+      consumer('b', 'source'),
+      consumer('c', 'b'),
+    ]);
+    expect(store.failWorkflowRun).not.toHaveBeenCalled();
+    expect(store.upsertWorkflowNodeSession).toHaveBeenCalledWith(
+      expect.objectContaining({ node_id: 'source', provider_session_id: 'T1' })
+    );
+    // `b` forks the persisted session whole; `c` continues `b`'s fork in place.
+    expect(continuations('b')).toEqual([['T1', true, undefined]]);
+    expect(continuations('c')).toEqual([['T2', false, 'turn2']]);
+    expect(store.upsertWorkflowRunNodeSession).toHaveBeenCalledWith({
+      workflow_run_id: 'addressable-run',
+      node_id: 'source',
+      provider: 'codex',
+      provider_session_id: 'T1',
+      session_path: [{ key: 'source', sessionId: 'T1' }],
+    });
   });
 
   it('retries a failed in-place attempt from the same checkpoint', async () => {
@@ -319,6 +370,47 @@ export function registerNamedForkTests(fixture: ReturnType<typeof setupAddressab
     expect(continuations('consumer')).toEqual([
       ['T1', false, 'turn1'],
       ['T1', false, 'turn1'],
+    ]);
+  });
+
+  it('forks the retry of an in-place attempt that timed out', async () => {
+    const counters = { threads: 0, turns: 0 };
+    let consumerCalls = 0;
+    mockSendQueryDag.mockImplementation(async function* (prompt, _cwd, session, options) {
+      if (prompt === 'consumer' && ++consumerCalls === 1) {
+        // Silent until the idle timeout aborts it, like a provider still starting its turn.
+        await new Promise(resolve => {
+          options?.abortSignal?.addEventListener('abort', resolve, { once: true });
+        });
+        return;
+      }
+      yield { type: 'agent_message_chunk', text: prompt };
+      yield checkpointResult(session, options?.forkSession, counters);
+    });
+    const store = await fixture.runAddressableWorkflow([
+      {
+        id: 'source',
+        kind: 'agent',
+        provider: 'codex',
+        source: { kind: 'inline', prompt: 'source' },
+      },
+      {
+        id: 'consumer',
+        kind: 'agent',
+        provider: 'codex',
+        source: { kind: 'inline', prompt: 'consumer' },
+        context: { resume: 'source' },
+        depends_on: ['source'],
+        idle_timeout: 30,
+        retry: { max_attempts: 1, delay_ms: 1 },
+      },
+    ]);
+    expect(store.failWorkflowRun).not.toHaveBeenCalled();
+    // The timed-out attempt may still have a provider process on the session, so the retry
+    // forks it through the same point.
+    expect(continuations('consumer')).toEqual([
+      ['T1', false, 'turn1'],
+      ['T1', true, 'turn1'],
     ]);
   });
 

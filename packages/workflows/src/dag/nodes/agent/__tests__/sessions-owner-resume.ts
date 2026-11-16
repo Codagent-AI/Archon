@@ -13,7 +13,7 @@ import {
 import { executeDagWorkflow } from '../../../../dag-executor';
 import type { DagNode } from '../../../../schemas';
 import { dagNodeSchema } from '../../../../schemas';
-import type { IWorkflowStore } from '../../../../store';
+import type { IWorkflowStore, PersistedNodeOutput } from '../../../../store';
 import { waitCompletionEvents } from '../../../../store';
 import { foldDagResumeSnapshot } from '../../../../dag-resume-snapshot';
 import type { WorkflowEventRow } from '../../../../schemas/workflow-event';
@@ -588,6 +588,173 @@ export function registerOwnerResumeTests(fixture: ReturnType<typeof setupAddress
     expect(resumed.failWorkflowRun).not.toHaveBeenCalled();
     expect(calls('owner')).toEqual([]);
     expect(calls('final')).toEqual([['O2', true]]);
+  });
+
+  /** A stored run node session row of the addressable run. */
+  function sessionRow(
+    node_id: string,
+    provider_session_id: string,
+    session_path: { key: string; sessionId: string }[] | null
+  ) {
+    const now = new Date().toISOString();
+    return {
+      workflow_run_id: 'addressable-run',
+      node_id,
+      provider: 'claude',
+      provider_session_id,
+      session_path,
+      created_at: now,
+      updated_at: now,
+    };
+  }
+
+  it('keeps a body node an earlier pass ran out of a resume after its group completes without it', async () => {
+    let owners = 0;
+    mockSendQueryDag.mockImplementation(async function* (prompt, _cwd, session) {
+      const sessionId = prompt === 'owner' ? `O${++owners}` : 'F';
+      yield { type: 'agent_message_chunk', text: sessionId };
+      yield { type: 'result', sessionId, ...(session ? { resumed: true } : {}) };
+    });
+    const nodes: DagNode[] = [
+      { id: 'source', kind: 'agent', source: { kind: 'inline', prompt: 'source' } },
+      {
+        id: 'group',
+        kind: 'loop_group',
+        depends_on: ['source'],
+        loop_group: {
+          max_iterations: 1,
+          fresh_context: false,
+          until_bash: 'exit 0',
+          nodes: [
+            {
+              id: 'owner',
+              kind: 'agent',
+              source: { kind: 'inline', prompt: 'owner' },
+              context: { resume: 'source' },
+            },
+            {
+              id: 'extra',
+              kind: 'agent',
+              source: { kind: 'inline', prompt: 'extra' },
+              context: { resume: 'source' },
+              depends_on: ['owner'],
+              when: '1 == 0',
+            },
+          ],
+        },
+      },
+      {
+        id: 'final',
+        kind: 'agent',
+        depends_on: ['group'],
+        source: { kind: 'inline', prompt: 'final' },
+        context: { resume: 'source' },
+      },
+    ];
+    const calls = (prompt: string): unknown[][] =>
+      mockSendQueryDag.mock.calls.filter(c => c[0] === prompt).map(c => [c[2], c[3]?.forkSession]);
+    // An earlier pass completed the source and ran `extra` before the group failed.
+    const earlier = [
+      sessionRow('source', 'S', [{ key: 'source', sessionId: 'S' }]),
+      sessionRow('group.extra', 'X1', [
+        { key: 'source', sessionId: 'S' },
+        { key: 'group[1].extra', sessionId: 'X1' },
+      ]),
+    ];
+    const store = createMockStore();
+    store.listWorkflowRunNodeSessions.mockResolvedValue(earlier);
+    const source = { output: 'S', sessionId: 'S' };
+    await fixture.runAddressableWorkflow(nodes, store, new Map([['source', source]]), earlier);
+    expect(store.failWorkflowRun).not.toHaveBeenCalled();
+    expect(calls('extra')).toEqual([]);
+    expect(calls('final')).toEqual([['O1', true]]);
+    const upsert = store.upsertWorkflowRunNodeSession as Mock<
+      IWorkflowStore['upsertWorkflowRunNodeSession']
+    >;
+    expect(upsert).toHaveBeenCalledWith({
+      workflow_run_id: 'addressable-run',
+      node_id: 'group.extra',
+      provider: 'claude',
+      provider_session_id: 'X1',
+    });
+
+    // A later resume after `final` failed hands on only what the completing pass handed on.
+    const rows = new Map(earlier.map(row => [row.node_id, row]));
+    for (const [row] of upsert.mock.calls) {
+      const path = row.session_path ? [...row.session_path] : null;
+      rows.set(row.node_id, sessionRow(row.node_id, row.provider_session_id, path));
+    }
+    rows.delete('final');
+    mockSendQueryDag.mockClear();
+    const resumed = await fixture.runAddressableWorkflow(
+      nodes,
+      createMockStore(),
+      new Map<string, PersistedNodeOutput>([
+        ['source', source],
+        ['group', { output: 'O1' }],
+      ]),
+      [...rows.values()]
+    );
+    expect(resumed.failWorkflowRun).not.toHaveBeenCalled();
+    expect(calls('final')).toEqual([['O1', true]]);
+  });
+
+  it('restores a row whose session an older binary rewrote without its lineage', async () => {
+    mockSendQueryDag.mockImplementation(async function* (prompt, _cwd, session) {
+      yield { type: 'agent_message_chunk', text: prompt };
+      yield { type: 'result', sessionId: 'F', ...(session ? { resumed: true } : {}) };
+    });
+    const nodes: DagNode[] = [
+      { id: 'source', kind: 'agent', source: { kind: 'inline', prompt: 'source' } },
+      {
+        id: 'group',
+        kind: 'loop_group',
+        depends_on: ['source'],
+        loop_group: {
+          max_iterations: 1,
+          fresh_context: false,
+          until_bash: 'exit 0',
+          nodes: [
+            {
+              id: 'owner',
+              kind: 'agent',
+              source: { kind: 'inline', prompt: 'owner' },
+              context: { resume: 'source' },
+            },
+          ],
+        },
+      },
+      {
+        id: 'final',
+        kind: 'agent',
+        depends_on: ['group'],
+        source: { kind: 'inline', prompt: 'final' },
+        context: { resume: 'source' },
+      },
+    ];
+    // This binary recorded S1 and O1; an older one then ran both again and recorded S2 and O2
+    // without touching their paths.
+    const rows = [
+      sessionRow('source', 'S2', [{ key: 'source', sessionId: 'S1' }]),
+      sessionRow('group.owner', 'O2', [
+        { key: 'source', sessionId: 'S1' },
+        { key: 'group[1].owner', sessionId: 'O1' },
+      ]),
+    ];
+    const store = await fixture.runAddressableWorkflow(
+      nodes,
+      createMockStore(),
+      new Map([
+        ['source', { output: 'S2', sessionId: 'S2' }],
+        ['group', { output: 'O2' }],
+      ]),
+      rows
+    );
+    expect(store.failWorkflowRun).not.toHaveBeenCalled();
+    // Like the older binary, the final node continues the source, not the body's session.
+    expect(
+      mockSendQueryDag.mock.calls.filter(c => c[0] === 'final').map(c => [c[2], c[3]?.forkSession])
+    ).toEqual([['S2', true]]);
   });
 
   it('restarts each reask pass of a Pi owner from its starting point', async () => {

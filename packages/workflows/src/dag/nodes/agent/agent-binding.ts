@@ -96,7 +96,7 @@ export async function bindAgentNode(
       ...(continuation.kind === 'named'
         ? {
             sessionSourceNodeId: continuation.sourceNodeId,
-            sessionForkRequested: continuation.forkRequested,
+            sessionForkRequested: !continuation.inPlace,
           }
         : {}),
       ...(nodeMcp.kind === 'unavailable' ? { mcpUnavailable: nodeMcp.record } : {}),

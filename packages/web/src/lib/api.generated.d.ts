@@ -6054,6 +6054,11 @@ export interface components {
               key: string;
               sessionId: string;
               checkpoint?: string;
+              merged?: {
+                key: string;
+                sessionId: string;
+                checkpoint?: string;
+              }[];
             }[];
           };
         };
@@ -6068,6 +6073,11 @@ export interface components {
                 key: string;
                 sessionId: string;
                 checkpoint?: string;
+                merged?: {
+                  key: string;
+                  sessionId: string;
+                  checkpoint?: string;
+                }[];
               }[];
             };
           };
@@ -6655,6 +6665,11 @@ export interface components {
                 key: string;
                 sessionId: string;
                 checkpoint?: string;
+                merged?: {
+                  key: string;
+                  sessionId: string;
+                  checkpoint?: string;
+                }[];
               }[];
             };
           };
@@ -6669,6 +6684,11 @@ export interface components {
                   key: string;
                   sessionId: string;
                   checkpoint?: string;
+                  merged?: {
+                    key: string;
+                    sessionId: string;
+                    checkpoint?: string;
+                  }[];
                 }[];
               };
             };
@@ -6699,6 +6719,11 @@ export interface components {
                 key: string;
                 sessionId: string;
                 checkpoint?: string;
+                merged?: {
+                  key: string;
+                  sessionId: string;
+                  checkpoint?: string;
+                }[];
               }[];
             };
           };
@@ -6713,6 +6738,11 @@ export interface components {
                   key: string;
                   sessionId: string;
                   checkpoint?: string;
+                  merged?: {
+                    key: string;
+                    sessionId: string;
+                    checkpoint?: string;
+                  }[];
                 }[];
               };
             };
@@ -6747,6 +6777,11 @@ export interface components {
                 key: string;
                 sessionId: string;
                 checkpoint?: string;
+                merged?: {
+                  key: string;
+                  sessionId: string;
+                  checkpoint?: string;
+                }[];
               }[];
             };
           };
@@ -6761,6 +6796,11 @@ export interface components {
                   key: string;
                   sessionId: string;
                   checkpoint?: string;
+                  merged?: {
+                    key: string;
+                    sessionId: string;
+                    checkpoint?: string;
+                  }[];
                 }[];
               };
             };

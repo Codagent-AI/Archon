@@ -11,7 +11,7 @@ import { type ModelAliasPreset, type TierName } from '../../../model-validation'
 import { getLog } from '../../log';
 import { RunSourceUnreadableError } from '../../node-source';
 import { beginExecution, type RunLayersContext } from '../../run-context';
-import { pathOf, type NamedSession } from '../../named-session';
+import { bodySessionIds, pathOf, type NamedSession } from '../../named-session';
 import type { LoopGroupBodyResult, LoopGroupRun, LoopGroupProgress } from './loop-group-state';
 import {
   completeEscalatedResume,
@@ -121,15 +121,34 @@ async function handOnBodySessions(
   bodySessionCursors: ReadonlyMap<string, NamedSession>
 ): Promise<void> {
   if (ctx.nodeSessionHandles === undefined) return;
+  const rowId = (bodyNodeId: string): string => `${ctx.stepNamePrefix}${node.id}.${bodyNodeId}`;
   for (const [bodyNodeId, session] of bodySessionCursors) {
     ctx.nodeSessionHandles.set(session.key, { ...session, producer: node.id });
     ctx.bodySessionCursors?.set(`${node.id}.${bodyNodeId}`, session);
     await ctx.deps.store.upsertWorkflowRunNodeSession({
       workflow_run_id: ctx.workflowRun.id,
-      node_id: `${ctx.stepNamePrefix}${node.id}.${bodyNodeId}`,
+      node_id: rowId(bodyNodeId),
       provider: session.provider,
       provider_session_id: session.sessionId,
       session_path: pathOf(session),
+    });
+  }
+  // A body node this pass never ran may have a row from an earlier failed pass. Recording it
+  // without its lineage keeps a later workflow resume from handing on what this pass did not.
+  const notHandedOn = new Set(
+    [...bodySessionIds(resolvedBodyNodes(node.loop_group), ctx.namedSessionNodeIds ?? new Set())]
+      .map(([id]) => id)
+      .filter(id => !bodySessionCursors.has(id))
+      .map(rowId)
+  );
+  if (notHandedOn.size === 0) return;
+  for (const row of await ctx.deps.store.listWorkflowRunNodeSessions(ctx.workflowRun.id)) {
+    if (!notHandedOn.has(row.node_id) || row.session_path === null) continue;
+    await ctx.deps.store.upsertWorkflowRunNodeSession({
+      workflow_run_id: ctx.workflowRun.id,
+      node_id: row.node_id,
+      provider: row.provider,
+      provider_session_id: row.provider_session_id,
     });
   }
 }

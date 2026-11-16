@@ -5,6 +5,7 @@
 import type { WorkflowDeps } from '../deps';
 import type {
   DagNode,
+  NamedSessionPoint,
   NodeOutput,
   ResolvedWorkflow,
   WorkflowRun,
@@ -55,9 +56,10 @@ export function restoreRunState(
 /**
  * The named sessions of the nodes a prior pass completed: each top-level node's own, and the
  * latest session of each body node of a completed loop_group, nested groups' included, which
- * steps after the group may continue. The completed-output snapshot is the authority for which nodes survived the
- * previous pass, so a handle is never resurrected without its completion. A body row an
- * older binary wrote has no lineage and was never continued after its group, so it stays out.
+ * steps after the group may continue. The completed-output snapshot is the authority for
+ * which nodes survived the previous pass, so a handle is never resurrected without its
+ * completion. A body row without a lineage stays out: an older binary wrote it, and never
+ * continued it after its group, or the group's last completion did not hand it on.
  */
 function restoreNamedSessions(
   nodes: readonly DagNode[],
@@ -79,7 +81,7 @@ function restoreNamedSessions(
       namedSessionNodeIds
     ).keys()) {
       const bodyRow = rowsById.get(`${node.id}.${bodyId}`);
-      if (bodyRow?.session_path == null) continue;
+      if (bodyRow === undefined || sessionPathOf(bodyRow) === undefined) continue;
       const session = restoredSession(bodyRow, bodyRow.node_id);
       handles.set(session.key, { ...session, producer: node.id });
     }
@@ -87,18 +89,24 @@ function restoreNamedSessions(
   return handles;
 }
 
+/**
+ * A row's lineage, ending with the row's own point, or undefined for a row without one. An
+ * older binary rewrites a row's session but not its path, so a path that ends with another
+ * session predates the row's session and is not its lineage.
+ */
+function sessionPathOf(row: WorkflowRunNodeSession): readonly NamedSessionPoint[] | undefined {
+  const path = row.session_path;
+  if (path === null || path.at(-1)?.sessionId !== row.provider_session_id) return undefined;
+  return path;
+}
+
 /** A row as a session: its path's last point is the row's own, the points before it its lineage. */
 function restoredSession(
   row: WorkflowRunNodeSession,
   legacyKey: string
 ): Omit<NamedSessionHandle, 'producer'> {
-  const path = row.session_path ?? [];
+  const path = sessionPathOf(row) ?? [];
   const own = path.at(-1);
-  if (own !== undefined && own.sessionId !== row.provider_session_id) {
-    throw new Error(
-      `Node '${row.node_id}' has a recorded session lineage that does not end with its own session.`
-    );
-  }
   return {
     key: own?.key ?? legacyKey,
     sessionId: row.provider_session_id,

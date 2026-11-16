@@ -917,8 +917,10 @@ The owner's first turn continues `implement`'s conversation, and each later iter
 continues it from where the previous iteration left it: earlier iterations count as
 dependencies of every body node. Reviewers start fresh and add nothing to it. A named
 session also wins over `fresh_context` and parallel-layer resets. Two parallel owners that
-both name `implement` each keep their own branch across iterations. A skipped owner adds
-nothing in that iteration and keeps its conversation for the next. When the group
+both name `implement` each keep their own branch across iterations, unless a body node that
+depends on both also names `implement`: that node resolves their branches, and in the next
+iteration each owner continues its conversation. A skipped owner adds nothing in that
+iteration and keeps its conversation for the next. When the group
 completes, a node after it that names `implement` continues the conversation the owner
 left. How the provider continues it (in place or by a fork) is described under
 [Named session context](/reference/workflow-language/#named-session-context).

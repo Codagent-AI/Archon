@@ -14,6 +14,7 @@ import { getLog } from '../../log';
 import { loadNodeCommandPrompt } from '../../node-source';
 import {
   aiNodeEnvironment,
+  type NamedContinuation,
   type RunLayersContext,
   type SessionCheckpoint,
   type SessionContinuation,
@@ -274,10 +275,10 @@ function sessionQueryOptions(
   if (continuation.kind === 'ordinary') {
     return resumeSessionId !== undefined ? { forkSession: true } : {};
   }
-  const { head, mode, forkRequested } = continuation;
+  const { head, inPlace } = continuation;
   return {
-    forkSession: forkRequested,
-    ...(mode === 'checkpoint' ? { sessionCheckpoint: head.checkpoint } : {}),
+    forkSession: !inPlace,
+    ...(head.checkpoint !== undefined ? { sessionCheckpoint: head.checkpoint } : {}),
   };
 }
 
@@ -415,9 +416,9 @@ function emptyOutputFailure(pc: AgentPassContext, state: AgentAttemptState): Wor
 function assertNamedSessionResumed(
   nodeId: string,
   state: AgentAttemptState,
-  continuation: Extract<SessionContinuation, { kind: 'named' }>
+  continuation: NamedContinuation
 ): void {
-  const { sourceNodeId, head, forkRequested } = continuation;
+  const { sourceNodeId, head, inPlace } = continuation;
   const newSessionId = state.sessionId;
   if (state.resumed !== true) {
     throw new Error(
@@ -429,7 +430,7 @@ function assertNamedSessionResumed(
       `Node '${nodeId}' resumed '${sourceNodeId}' but the provider returned no branch session ID.`
     );
   }
-  if (forkRequested && newSessionId === head.sessionId) {
+  if (!inPlace && newSessionId === head.sessionId) {
     throw new Error(
       `Node '${nodeId}' did not create an immutable fork of '${sourceNodeId}': the provider reused the source session ID.`
     );

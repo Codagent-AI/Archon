@@ -40,13 +40,12 @@ import {
   startingPoint,
   upstreamOf,
   type NamedSession,
-  type NamedSessionMode,
 } from '../../named-session';
 import { executeAgentNode } from './agent';
 
 type SessionSelection =
   | { kind: 'ordinary'; resumeSessionId: string | undefined }
-  | { kind: 'named'; sourceNodeId: string; head: NamedSession; mode: NamedSessionMode };
+  | { kind: 'named'; sourceNodeId: string; head: NamedSession };
 
 /** The session a selection resumes, and the named session it continues, if any. */
 function selectedStart(session: SessionSelection): {
@@ -118,7 +117,11 @@ export async function dispatchAgentNode(
   // the snapshot covers every attempt, and a violation fails the node
   // without offering retry another chance to mutate.
   const recorded: { ended?: EndedSession } = {};
-  const recordEnded = recordingEnded(sessionCheckpoint(ctx, node, provider, head), recorded);
+  const recordEnded = recordingEnded(
+    sessionCheckpoint(ctx, node, provider, head),
+    recorded,
+    forkedByLaterRuns(ctx, usesPersistedScope, session)
+  );
   const checkoutExcludes = checkoutSnapshotExcludes(ctx.artifactsDir, ctx.stateDir, ctx.logDir);
   const treeBefore = await snapshotGuardedNode(ctx, node, checkoutExcludes);
   const retriedOutput = await runNodeRetryLoop(
@@ -293,43 +296,71 @@ function namedSessionOf(
 }
 
 /**
+ * Whether a later run continues this node's session, which it does by forking the session
+ * whole. Later nodes of this run then fork it too rather than continue it in place, so the
+ * session never holds their turns.
+ */
+function forkedByLaterRuns(
+  ctx: RunLayersContext,
+  usesPersistedScope: boolean,
+  session: SessionSelection
+): boolean {
+  return usesPersistedScope && ctx.persistScope !== undefined && session.kind === 'ordinary';
+}
+
+/**
  * The checkpoint callback for each attempt, which also keeps the session the latest attempt
- * recorded in `recorded`; the completed attempt records last.
+ * recorded in `recorded`; the completed attempt records last. With `forkOnly`, the session is
+ * recorded without its checkpoint, so later nodes fork it.
  */
 function recordingEnded(
   checkpoint: SessionCheckpoint | undefined,
-  recorded: { ended?: EndedSession }
+  recorded: { ended?: EndedSession },
+  forkOnly: boolean
 ): SessionCheckpoint | undefined {
   if (checkpoint === undefined) return undefined;
-  return async ended => {
+  return async reported => {
+    const ended = forkOnly ? { ...reported, checkpoint: undefined } : reported;
     await checkpoint(ended);
     recorded.ended = ended;
   };
 }
 
 /**
- * Run one attempt on the session it continues. A checkpoint attempt continues its starting
- * point in place unless another running attempt already holds that session in place; the
- * claim lasts until the attempt ends, so a retry starts from the same point.
+ * Run one attempt on the session it continues. An attempt whose starting point has a
+ * checkpoint continues it in place unless another attempt holds that session in place. The
+ * claim ends with the attempt, so a retry starts from the same point, unless the attempt
+ * failed by a timeout or a cancel, or threw: it may have stopped reading the provider before
+ * the provider process ended, and that process may still start a turn on the session, so a
+ * retry and every later attempt fork the session through the point instead.
  */
-async function continuingSession<T>(
+async function continuingSession(
   ctx: RunLayersContext,
   session: SessionSelection,
-  attempt: (continuation: SessionContinuation) => Promise<T>
-): Promise<T> {
+  attempt: (continuation: SessionContinuation) => Promise<NodeExecutionResult>
+): Promise<NodeExecutionResult> {
   if (session.kind === 'ordinary') return attempt({ kind: 'ordinary' });
-  const { head, mode, sourceNodeId } = session;
-  const named = { kind: 'named', sourceNodeId, head, mode } as const;
+  const { head, sourceNodeId } = session;
+  const { checkpoint } = head;
   const held = ctx.sessionsContinuedInPlace;
-  if (mode !== 'checkpoint' || held === undefined || held.has(head.sessionId)) {
-    return attempt({ ...named, forkRequested: true });
+  // A point without a checkpoint is always forked. Its provider may report none, and then
+  // cannot fork a session at a point, so continuing in place could hand a concurrent fork this
+  // attempt's unfinished turn; or it is a session later runs continue (`recordingEnded`).
+  if (checkpoint === undefined || held === undefined || held.has(head.sessionId)) {
+    return attempt({ kind: 'named', sourceNodeId, head, inPlace: false });
   }
   held.add(head.sessionId);
-  try {
-    return await attempt({ ...named, forkRequested: false });
-  } finally {
-    held.delete(head.sessionId);
-  }
+  const output = await attempt({
+    kind: 'named',
+    sourceNodeId,
+    head: { ...head, checkpoint },
+    inPlace: true,
+  });
+  const cutOff =
+    output.state === 'failed' &&
+    (output.failureKind === 'timeout' || output.failureKind === 'cancelled');
+  if (!cutOff) held.delete(head.sessionId);
+  return output;
 }
 
 /**
@@ -381,10 +412,8 @@ function selectSession(
 }
 
 /**
- * The point a node naming `sourceNodeId` continues from (see `named-session.ts`), and how.
- * A provider that reports checkpoints continues it in place where it can. Any other provider
- * forks it: it cannot fork a session at a point, so continuing one in place could hand a
- * concurrent fork of the same session this attempt's unfinished turn.
+ * The point a node naming `sourceNodeId` continues from (see `named-session.ts`). Each attempt
+ * continues it in place where it can (see {@link continuingSession}).
  */
 function selectNamedSession(
   ctx: RunLayersContext,
@@ -415,8 +444,7 @@ function selectNamedSession(
       `Node '${node.id}' cannot resume '${sourceNodeId}': resolved provider '${provider}' does not support immutable session forks.`
     );
   }
-  const mode: NamedSessionMode = head.checkpoint !== undefined ? 'checkpoint' : 'fork';
-  return { kind: 'named', sourceNodeId, head, mode };
+  return { kind: 'named', sourceNodeId, head };
 }
 
 /**
