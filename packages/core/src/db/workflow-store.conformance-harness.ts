@@ -77,7 +77,7 @@ export async function makeSqlConformanceHarness(
       );
     },
     backdate: async (id, dates): Promise<void> => {
-      for (const field of ['started_at', 'last_activity_at'] as const) {
+      for (const field of ['started_at', 'completed_at', 'last_activity_at'] as const) {
         const date = dates[field];
         if (date === undefined) continue;
         const value =

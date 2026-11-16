@@ -28,7 +28,7 @@ export interface WorkflowStoreHarness {
   seedPersistedWait(runId: string, wait: Record<string, unknown>): Promise<void>;
   backdate(
     runId: string,
-    dates: { started_at?: Date; last_activity_at?: Date | null }
+    dates: { started_at?: Date; completed_at?: Date | null; last_activity_at?: Date | null }
   ): Promise<void>;
   /** A snapshot: tests compare it with a later call to prove no report was emitted. */
   terminalReports(): string[];

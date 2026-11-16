@@ -142,6 +142,7 @@ export function describeEventFeedConformance(getHarness: () => WorkflowStoreHarn
       const committed = await store.listWorkflowEvents(run.id);
       await harness.backdate(run.id, {
         started_at: new Date('2000-01-01'),
+        completed_at: new Date('2000-01-01'),
         last_activity_at: new Date('2000-01-01'),
       });
       await store.deleteOldWorkflowRuns(1);
@@ -168,6 +169,7 @@ export function describeEventFeedConformance(getHarness: () => WorkflowStoreHarn
       const head = await store.getWorkflowEventHead();
       await harness.backdate(run.id, {
         started_at: new Date('2000-01-01'),
+        completed_at: new Date('2000-01-01'),
         last_activity_at: new Date('2000-01-01'),
       });
       await store.deleteOldWorkflowRuns(1);
