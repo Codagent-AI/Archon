@@ -286,7 +286,7 @@ export function describeListingConformance(getHarness: () => WorkflowStoreHarnes
       const failed = await create(store, { codebase_id: CONFORMANCE_CODEBASE_ID });
       await store.failWorkflowRun(failed.id, 'failed');
       const old = new Date(Date.now() - 4 * 86_400_000);
-      await harness.backdate(failed.id, { started_at: old });
+      await harness.backdate(failed.id, { started_at: old, completed_at: old });
       expect(
         (await store.findOpenWorkRuns({ codebaseId: CONFORMANCE_CODEBASE_ID })).map(run => run.id)
       ).toEqual([failed.id]);
@@ -315,6 +315,41 @@ export function describeListingConformance(getHarness: () => WorkflowStoreHarnes
       expect(await store.listWorkflowEvents(failed.id)).toEqual([]);
       expect(await store.getWorkflowRunStatus(first.id)).toBe('pending');
       expect(await rejection(store.deleteOldWorkflowRuns(-1))).toBeInstanceOf(Error);
+    });
+    test('cleanup ages terminal runs by when they finished, not when they started', async () => {
+      const day = 86_400_000;
+      const longRecentlyDone = await create(store);
+      await store.claimPendingWorkflowRun(longRecentlyDone.id);
+      await store.completeWorkflowRun(longRecentlyDone.id, { duration_ms: 1 });
+      await harness.backdate(longRecentlyDone.id, {
+        started_at: new Date(Date.now() - 10 * day),
+        completed_at: new Date(Date.now() - 1 * day),
+      });
+      const oldDone = await create(store);
+      await store.failWorkflowRun(oldDone.id, 'failed');
+      await harness.backdate(oldDone.id, {
+        started_at: new Date(Date.now() - 12 * day),
+        completed_at: new Date(Date.now() - 5 * day),
+      });
+      const noCompletedAt = await create(store);
+      await store.claimPendingWorkflowRun(noCompletedAt.id);
+      await store.cancelWorkflowRun(noCompletedAt.id);
+      await harness.backdate(noCompletedAt.id, {
+        started_at: new Date(Date.now() - 9 * day),
+        completed_at: null,
+      });
+      const stillRunning = await create(store);
+      await harness.backdate(stillRunning.id, { started_at: new Date(Date.now() - 20 * day) });
+
+      expect(await store.deleteOldWorkflowRuns(3)).toEqual({ count: 2 });
+
+      // Started 10 days ago but finished 1 day ago: kept.
+      expect(await store.getWorkflowRun(longRecentlyDone.id)).not.toBeNull();
+      expect(await store.getWorkflowRun(oldDone.id)).toBeNull();
+      // A terminal run without a finish time falls back to its start time.
+      expect(await store.getWorkflowRun(noCompletedAt.id)).toBeNull();
+      // Non-terminal runs are never cleaned up, however old.
+      expect(await store.getWorkflowRun(stillRunning.id)).not.toBeNull();
     });
     test('origin-free and chat runs round-trip the supplied provenance', async () => {
       const free = await create(store);

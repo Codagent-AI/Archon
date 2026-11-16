@@ -241,8 +241,10 @@ export async function updateWorkflowActivity(id: string): Promise<void> {
 }
 
 /**
- * Delete terminal workflow runs older than the given number of days.
- * Returns the count of deleted runs.
+ * Delete terminal workflow runs that finished more than the given number of days ago.
+ * Age is measured from `completed_at`, so a long run that ended recently is kept. A
+ * terminal run with no `completed_at` (written before the column was set on every
+ * terminal path) falls back to `started_at`. Returns the count of deleted runs.
  */
 export async function deleteOldWorkflowRuns(olderThanDays: number): Promise<{ count: number }> {
   if (!Number.isInteger(olderThanDays) || olderThanDays < 0) {
@@ -258,14 +260,14 @@ export async function deleteOldWorkflowRuns(olderThanDays: number): Promise<{ co
         `DELETE FROM remote_agent_workflow_events WHERE workflow_run_id IN (
           SELECT id FROM remote_agent_workflow_runs
           WHERE status IN ('completed', 'failed', 'cancelled')
-            AND started_at < ${cutoff}
+            AND COALESCE(completed_at, started_at) < ${cutoff}
         )`,
         [olderThanDays]
       );
       const result = await query(
         `DELETE FROM remote_agent_workflow_runs
          WHERE status IN ('completed', 'failed', 'cancelled')
-           AND started_at < ${cutoff}`,
+           AND COALESCE(completed_at, started_at) < ${cutoff}`,
         [olderThanDays]
       );
       return { count: result.rowCount ?? 0 };
