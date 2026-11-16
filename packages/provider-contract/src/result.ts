@@ -95,6 +95,12 @@ export const providerResultSchema = z.object({
    */
   resumed: z.boolean().optional(),
   /**
+   * The provider's marker for this turn's end in `sessionId`, which a later query passes as
+   * `sessionCheckpoint` to continue from exactly this point. Omitted by a provider that has
+   * no such marker.
+   */
+  sessionCheckpoint: z.string().min(1).optional(),
+  /**
    * Set only on a failed result of a turn that asked to resume a session, when the provider
    * confirmed through a structured check (never the vendor's error text) that the session no
    * longer exists, and the rejection did no model work. The engine may retry the turn once on

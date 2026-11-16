@@ -66,9 +66,17 @@ export function describeListingConformance(getHarness: () => WorkflowStoreHarnes
         node_id: 'build',
         provider: 'claude',
         provider_session_id: 'first',
+        session_path: [
+          { key: 'root', sessionId: 'first' },
+          { key: 'build', sessionId: 'first', checkpoint: 'cp-1' },
+        ],
       });
       const runInitial = await store.listWorkflowRunNodeSessions(run.id);
       expect(workflowRunNodeSessionSchema.safeParse(runInitial[0]).success).toBe(true);
+      expect(runInitial[0]?.session_path).toEqual([
+        { key: 'root', sessionId: 'first' },
+        { key: 'build', sessionId: 'first', checkpoint: 'cp-1' },
+      ]);
       // SQLite's session clock resolves seconds; cross a tick so resetting created_at cannot pass.
       await Bun.sleep(1100);
       await store.upsertWorkflowNodeSession({
@@ -105,6 +113,8 @@ export function describeListingConformance(getHarness: () => WorkflowStoreHarnes
         expect.objectContaining({
           provider: 'codex',
           provider_session_id: 'second',
+          // The upsert recorded no path, so the earlier one no longer describes the session.
+          session_path: null,
           created_at: runInitial[0]?.created_at,
         }),
       ]);

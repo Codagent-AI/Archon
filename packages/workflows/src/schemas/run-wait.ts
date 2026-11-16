@@ -115,7 +115,41 @@ export const sessionCursorSchema = z.object({
   provider: z.string().min(1),
 });
 export type SessionCursor = z.infer<typeof sessionCursorSchema>;
-export const bodySessionCursorsSchema = z.record(z.string().min(1), sessionCursorSchema);
+
+/**
+ * A completed step on a named session's lineage: the step's record key (its path with loop
+ * iterations), its provider session, and the provider's marker for the step's last turn,
+ * when the provider reports one.
+ */
+export const namedSessionBranchSchema = z.object({
+  key: z.string().min(1),
+  sessionId: z.string().min(1),
+  checkpoint: z.string().min(1).optional(),
+});
+export type NamedSessionBranch = z.infer<typeof namedSessionBranchSchema>;
+
+/**
+ * A point a step continued from because it was the last point several branches shared also
+ * lists the points of those branches (`merged`): the step resolved them, so a later step that
+ * continues the step is not sent back to this point by them.
+ */
+export const namedSessionPointSchema = namedSessionBranchSchema.extend({
+  merged: z.array(namedSessionBranchSchema).optional(),
+});
+export type NamedSessionPoint = z.infer<typeof namedSessionPointSchema>;
+
+/**
+ * A named session a later step can continue: the latest point and the points before it,
+ * root first. A cursor saved before lineage existed has only `sessionId` and `provider`.
+ */
+export const namedSessionCursorSchema = sessionCursorSchema.extend({
+  key: z.string().min(1).optional(),
+  checkpoint: z.string().min(1).optional(),
+  lineage: z.array(namedSessionPointSchema).optional(),
+});
+export type NamedSessionCursor = z.infer<typeof namedSessionCursorSchema>;
+export const bodySessionCursorsSchema = z.record(z.string().min(1), namedSessionCursorSchema);
+export type BodySessionCursors = z.infer<typeof bodySessionCursorsSchema>;
 
 export const bodySessionCursorAncestrySchema = z.record(
   z.string().min(1),

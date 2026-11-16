@@ -11,6 +11,7 @@ import { type ModelAliasPreset, type TierName } from '../../../model-validation'
 import { getLog } from '../../log';
 import { RunSourceUnreadableError } from '../../node-source';
 import { beginExecution, type RunLayersContext } from '../../run-context';
+import { bodySessionIds, pathOf, type NamedSession } from '../../named-session';
 import type { LoopGroupBodyResult, LoopGroupRun, LoopGroupProgress } from './loop-group-state';
 import {
   completeEscalatedResume,
@@ -76,6 +77,9 @@ export async function executeLoopGroupNode(
       workflowTier,
       workflowPreset
     );
+    if (result.state === 'completed' && progress.bodySessionCursors !== undefined) {
+      await handOnBodySessions(ctx, node, progress.bodySessionCursors);
+    }
   } catch (error) {
     // These interruptions leave lifecycle ownership to run recovery.
     if (
@@ -102,6 +106,51 @@ export async function executeLoopGroupNode(
     );
   }
   return recordGroupResult(ctx, execution, result);
+}
+
+/**
+ * Hands a completed group's named body sessions to the nodes after it, as sessions the group
+ * produced: each body node's latest one, keyed by record key. Each body node's session row is
+ * rewritten to match, so a workflow resume restores what this pass handed on. Inside an
+ * enclosing loop_group they also join the enclosing group's body sessions under this group's
+ * id, so its later iterations, its pauses and the nodes after it carry them on.
+ */
+async function handOnBodySessions(
+  ctx: RunLayersContext,
+  node: LoopGroupNode,
+  bodySessionCursors: ReadonlyMap<string, NamedSession>
+): Promise<void> {
+  if (ctx.nodeSessionHandles === undefined) return;
+  const rowId = (bodyNodeId: string): string => `${ctx.stepNamePrefix}${node.id}.${bodyNodeId}`;
+  for (const [bodyNodeId, session] of bodySessionCursors) {
+    ctx.nodeSessionHandles.set(session.key, { ...session, producer: node.id });
+    ctx.bodySessionCursors?.set(`${node.id}.${bodyNodeId}`, session);
+    await ctx.deps.store.upsertWorkflowRunNodeSession({
+      workflow_run_id: ctx.workflowRun.id,
+      node_id: rowId(bodyNodeId),
+      provider: session.provider,
+      provider_session_id: session.sessionId,
+      session_path: pathOf(session),
+    });
+  }
+  // A body node this pass never ran may have a row from an earlier failed pass. Recording it
+  // without its lineage keeps a later workflow resume from handing on what this pass did not.
+  const notHandedOn = new Set(
+    [...bodySessionIds(resolvedBodyNodes(node.loop_group), ctx.namedSessionNodeIds ?? new Set())]
+      .map(([id]) => id)
+      .filter(id => !bodySessionCursors.has(id))
+      .map(rowId)
+  );
+  if (notHandedOn.size === 0) return;
+  for (const row of await ctx.deps.store.listWorkflowRunNodeSessions(ctx.workflowRun.id)) {
+    if (!notHandedOn.has(row.node_id) || row.session_path === null) continue;
+    await ctx.deps.store.upsertWorkflowRunNodeSession({
+      workflow_run_id: ctx.workflowRun.id,
+      node_id: row.node_id,
+      provider: row.provider,
+      provider_session_id: row.provider_session_id,
+    });
+  }
 }
 
 async function recordGroupResult(
@@ -200,6 +249,7 @@ async function executeLoopGroupBody(
     resume: readLoopGroupResume(ctx, node, bodyNodes, stepName, progress),
   };
   const { resume } = run;
+  progress.bodySessionCursors = resume.bodySessionCursors;
 
   const finalized = await finalizeGroupOnBareApprove(run);
   if (finalized !== undefined) return finalized;

@@ -8,6 +8,7 @@ import {
   pauseGateRespectingExternalTransition,
   sendPauseNotice,
   snapshotBodySessionCursorAncestry,
+  snapshotBodySessionCursors,
 } from '../../pause';
 import { finishNodeExecution, executionMetadata } from '../../../node-execution';
 import { serializeNodeStateRecord, serializeNodeOutput } from '../../../node-record-serialization';
@@ -32,6 +33,7 @@ import { getLog } from '../../log';
 import { runLayers } from '../../run-layers';
 import { sumTokenUsage } from '../../usage';
 import type { RunLayersContext } from '../../run-context';
+import { iterationNamedSessions, upstreamOf } from '../../named-session';
 import { nodeTemplateReferences } from '../../references';
 import { loopBodyScope, type LoopBodyScope } from '../../loop-scope';
 import { shouldContinueStreamingForStatus } from '../../run-control';
@@ -315,8 +317,13 @@ function bodyIteration(run: LoopGroupRun, state: LoopGroupState, i: number): Bod
     // session forward so a body AI node resumes the prior iteration's conversation.
     // Gate on the literal i === 1 (not startIteration): on interactive resume the
     // first processed iteration must continue the restored pre-pause session.
-    nodeSessionHandles: new Map(ctx.nodeSessionHandles),
-    namedResumeSourceIds: ctx.namedResumeSourceIds,
+    nodeSessionHandles: iterationNamedSessions(
+      ctx.nodeSessionHandles,
+      upstreamOf(ctx.layers).get(node.id) ?? new Set(),
+      resume.bodySessionCursors
+    ),
+    namedSessionNodeIds: ctx.namedSessionNodeIds,
+    sessionsContinuedInPlace: ctx.sessionsContinuedInPlace,
     bodySessionCursors: resume.bodySessionCursors,
     bodySessionCursorAncestry: resume.bodySessionCursorAncestry,
     lastSequentialSession: group.fresh_context || i === 1 ? undefined : state.lastSequentialSession,
@@ -717,9 +724,7 @@ async function pauseAtGroupGate(
     // a different provider (#1992). null = this pause has no cursor to restore.
     sessionId: state.lastSequentialSession?.sessionId ?? null,
     sessionProvider: state.lastSequentialSession?.provider ?? null,
-    ...(resume.bodySessionCursors !== undefined
-      ? { bodySessionCursors: Object.fromEntries(resume.bodySessionCursors) }
-      : {}),
+    ...snapshotBodySessionCursors(resume.bodySessionCursors),
     ...snapshotBodySessionCursorAncestry(resume.bodySessionCursorAncestry),
     // Signal state for finalize-on-bare-approve (#2074). The structured payload
     // rides along (#2637) so the finalize attaches it like a natural completion.

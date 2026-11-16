@@ -482,7 +482,8 @@ export async function completeLoop(
 ): Promise<NodeExecutionResult> {
   const { ctx, node } = run;
   if (state.sessionId !== undefined) {
-    await run.checkpointSession?.(state.sessionId);
+    // A loop reports no checkpoint: a node that continues it forks its whole session.
+    await run.checkpointSession?.({ sessionId: state.sessionId, checkpoint: undefined });
   }
   await safeSendMessage(
     ctx.platform,

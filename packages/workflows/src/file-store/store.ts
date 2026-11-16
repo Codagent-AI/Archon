@@ -25,7 +25,10 @@ import {
   workflowNodeSessionSchema,
   type WorkflowNodeSession,
 } from '../schemas/workflow-node-session';
-import { workflowRunNodeSessionSchema } from '../schemas/workflow-run-node-session';
+import {
+  workflowRunNodeSessionSchema,
+  type WorkflowRunNodeSession,
+} from '../schemas/workflow-run-node-session';
 import { foldDagResumeSnapshot } from '../dag-resume-snapshot';
 import { reportRunTerminalTelemetry } from '../run-terminal-telemetry';
 import { getWorkflowEventEmitter } from '../event-emitter';
@@ -184,6 +187,14 @@ export async function createFileWorkflowStore(
     return `node-sessions/${createHash('sha256')
       .update(JSON.stringify([scope.workflow_name, scope.scope_key]))
       .digest('hex')}.json`;
+  }
+  // Files written before session_path existed lack the key; they read back as null.
+  async function readRunSessions(file: string): Promise<WorkflowRunNodeSession[]> {
+    const raw = (await readJson(file)) ?? [];
+    const rows = Array.isArray(raw)
+      ? raw.map(row => (row && typeof row === 'object' ? { session_path: null, ...row } : row))
+      : raw;
+    return z.array(workflowRunNodeSessionSchema).parse(rows);
   }
   async function readSessions(path: string): Promise<WorkflowNodeSession[]> {
     return z.array(workflowNodeSessionSchema).parse((await readJson(join(root, path))) ?? []);
@@ -472,20 +483,17 @@ export async function createFileWorkflowStore(
       }),
     listWorkflowRunNodeSessions: async id => {
       await recoverBeforeRead(root);
-      return z
-        .array(workflowRunNodeSessionSchema)
-        .parse((await readJson(join(runPath(root, id), 'node-sessions.json'))) ?? []);
+      return readRunSessions(join(runPath(root, id), 'node-sessions.json'));
     },
     upsertWorkflowRunNodeSession: input =>
       commit(root, [input.workflow_run_id], async runs => {
         if (!runs.has(input.workflow_run_id)) throw new Error('Run missing');
         const path = `runs/${input.workflow_run_id}/node-sessions.json`;
-        const rows = z
-          .array(workflowRunNodeSessionSchema)
-          .parse((await readJson(join(root, path))) ?? []);
+        const rows = await readRunSessions(join(root, path));
         const prior = rows.find(row => row.node_id === input.node_id);
         const next = {
           ...input,
+          session_path: input.session_path ? [...input.session_path] : null,
           created_at: prior?.created_at ?? new Date().toISOString(),
           updated_at: new Date().toISOString(),
         };

@@ -574,7 +574,7 @@ async function finalizeOnBareApprove(
   // (pre-#2637 gates) → text-only, as before.
   const finalizeStructured = gate.signaledStructuredOutput ?? null;
   if (sessionId !== undefined) {
-    await approval.checkpointSession?.(sessionId);
+    await approval.checkpointSession?.({ sessionId, checkpoint: undefined });
   }
   return finalizeLoopFromSignal(
     ctx.deps,

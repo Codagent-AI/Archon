@@ -210,6 +210,7 @@ CREATE TABLE IF NOT EXISTS remote_agent_workflow_run_node_sessions (
   node_id VARCHAR(255) NOT NULL,
   provider VARCHAR(50) NOT NULL,
   provider_session_id TEXT NOT NULL,
+  session_path TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   PRIMARY KEY (workflow_run_id, node_id)
@@ -733,6 +734,10 @@ ALTER TABLE remote_agent_state_revisions ADD COLUMN IF NOT EXISTS writer_via TEX
 ALTER TABLE remote_agent_state_revisions ADD COLUMN IF NOT EXISTS lease_run_id TEXT;
 ALTER TABLE remote_agent_state_revisions ADD COLUMN IF NOT EXISTS lease_node_path TEXT;
 ALTER TABLE remote_agent_state_revisions ADD COLUMN IF NOT EXISTS lease_taken_at TIMESTAMP WITH TIME ZONE;
+
+-- The named-session lineage ending with the row's own point, as JSON text. Nullable:
+-- rows written before it existed have no lineage.
+ALTER TABLE remote_agent_workflow_run_node_sessions ADD COLUMN IF NOT EXISTS session_path TEXT;
 
 -- ============================================================================
 -- Indexes and column comments

@@ -128,6 +128,14 @@ export interface AgentRequestOptions {
    */
   forkSession?: boolean;
   /**
+   * Continue `resumeSessionId` from this checkpoint, a `sessionCheckpoint` the provider
+   * reported on an earlier result. The provider continues the session in place when the
+   * checkpoint is still its latest turn and `forkSession` is not set; otherwise it forks the
+   * session through the checkpoint, so the fork holds no turn after it. A provider that
+   * reports `sessionCheckpoint` must honor this option.
+   */
+  sessionCheckpoint?: string;
+  /**
    * In-process tools the model may call this turn. Defined once by the caller
    * (e.g. core's manage_run) and adapted per provider — Claude wraps each via
    * `createSdkMcpServer`/`tool()`, Codex via dynamic tools, Pi via `customTools`.

@@ -113,6 +113,7 @@ describe('resume', () => {
       node_id: 'source',
       provider: 'claude',
       provider_session_id: 'private-session',
+      session_path: null,
       created_at: '2026-08-19T00:00:00Z',
       updated_at: '2026-08-19T00:00:00Z',
     };
@@ -151,6 +152,7 @@ describe('resume', () => {
           node_id: 'node-a',
           provider: 'claude',
           provider_session_id: 'source-session',
+          session_path: null,
           created_at: '2026-08-19T00:00:00Z',
           updated_at: '2026-08-19T00:00:00Z',
         },

@@ -22,7 +22,7 @@ import {
 } from '../../../schemas/workflow-run';
 import { waitOutputFormat } from '../../../schemas/wait-node';
 import type { WaitCondition, WaitNode, WorkflowWaitContext } from '../../../schemas';
-import { type BodySessionCursorAncestry, type SessionCursor } from '../../../schemas';
+import { type BodySessionCursorAncestry, type BodySessionCursors } from '../../../schemas';
 import { readWorkflowWaitContext, waitUntilTimestampSchema, waitCondition } from '../../../schemas';
 import { waitCompletionEvents } from '../../../store';
 import {
@@ -45,7 +45,7 @@ export interface WaitLoopOwner {
   iteration: number;
   sessionId: string | null;
   sessionProvider: string | null;
-  bodySessionCursors?: Record<string, SessionCursor>;
+  bodySessionCursors?: BodySessionCursors;
   bodySessionCursorAncestry?: BodySessionCursorAncestry;
 }
 

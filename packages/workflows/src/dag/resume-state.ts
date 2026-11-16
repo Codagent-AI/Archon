@@ -5,6 +5,7 @@
 import type { WorkflowDeps } from '../deps';
 import type {
   DagNode,
+  NamedSessionPoint,
   NodeOutput,
   ResolvedWorkflow,
   WorkflowRun,
@@ -20,13 +21,14 @@ import {
 import { resolvedBodyNodes } from '../graph-plan';
 import type { PersistedNodeOutput } from '../store';
 import { getLog } from './log';
-import type { PersistScope, SequentialSessionCursor } from './run-context';
+import type { PersistScope } from './run-context';
+import { bodySessionIds, type NamedSessionHandle } from './named-session';
 
 export interface RestoredRunState {
   nodeOutputs: Map<string, NodeOutput>;
   persistScope: PersistScope | undefined;
-  namedResumeSourceIds: ReadonlySet<string>;
-  nodeSessionHandles: Map<string, SequentialSessionCursor>;
+  namedSessionNodeIds: ReadonlySet<string>;
+  nodeSessionHandles: Map<string, NamedSessionHandle>;
 }
 
 export function restoreRunState(
@@ -37,23 +39,80 @@ export function restoreRunState(
   priorNodeSessions: readonly WorkflowRunNodeSession[] | undefined
 ): RestoredRunState {
   const nodeOutputs = priorNodeOutputs(workflow, workflowRun, priorCompletedNodes);
-  const namedResumeSourceIds = collectNamedResumeSources(workflow.nodes);
-  const nodeSessionHandles = new Map<string, SequentialSessionCursor>();
-  for (const row of priorNodeSessions ?? []) {
-    // The completed-output snapshot is the authority for which nodes actually
-    // survived the previous pass. Never resurrect a handle without its completion.
-    if (namedResumeSourceIds.has(row.node_id) && nodeOutputs.has(row.node_id)) {
-      nodeSessionHandles.set(row.node_id, {
-        sessionId: row.provider_session_id,
-        provider: row.provider,
-      });
-    }
-  }
+  const namedSessionNodeIds = collectNamedSessionNodes(workflow.nodes);
   return {
     nodeOutputs,
     persistScope: openPersistScope(store, workflow, workflowRun),
-    namedResumeSourceIds,
-    nodeSessionHandles,
+    namedSessionNodeIds,
+    nodeSessionHandles: restoreNamedSessions(
+      workflow.nodes,
+      nodeOutputs,
+      namedSessionNodeIds,
+      priorNodeSessions ?? []
+    ),
+  };
+}
+
+/**
+ * The named sessions of the nodes a prior pass completed: each top-level node's own, and the
+ * latest session of each body node of a completed loop_group, nested groups' included, which
+ * steps after the group may continue. The completed-output snapshot is the authority for
+ * which nodes survived the previous pass, so a handle is never resurrected without its
+ * completion. A body row without a lineage stays out: an older binary wrote it, and never
+ * continued it after its group, or the group's last completion did not hand it on.
+ */
+function restoreNamedSessions(
+  nodes: readonly DagNode[],
+  nodeOutputs: ReadonlyMap<string, NodeOutput>,
+  namedSessionNodeIds: ReadonlySet<string>,
+  rows: readonly WorkflowRunNodeSession[]
+): Map<string, NamedSessionHandle> {
+  const rowsById = new Map(rows.map(row => [row.node_id, row]));
+  const handles = new Map<string, NamedSessionHandle>();
+  for (const node of nodes) {
+    if (!nodeOutputs.has(node.id)) continue;
+    const row = rowsById.get(node.id);
+    if (row !== undefined && namedSessionNodeIds.has(node.id)) {
+      handles.set(node.id, { ...restoredSession(row, node.id), producer: node.id });
+    }
+    if (!isLoopGroupNode(node)) continue;
+    for (const bodyId of bodySessionIds(
+      resolvedBodyNodes(node.loop_group),
+      namedSessionNodeIds
+    ).keys()) {
+      const bodyRow = rowsById.get(`${node.id}.${bodyId}`);
+      if (bodyRow === undefined || sessionPathOf(bodyRow) === undefined) continue;
+      const session = restoredSession(bodyRow, bodyRow.node_id);
+      handles.set(session.key, { ...session, producer: node.id });
+    }
+  }
+  return handles;
+}
+
+/**
+ * A row's lineage, ending with the row's own point, or undefined for a row without one. An
+ * older binary rewrites a row's session but not its path, so a path that ends with another
+ * session predates the row's session and is not its lineage.
+ */
+function sessionPathOf(row: WorkflowRunNodeSession): readonly NamedSessionPoint[] | undefined {
+  const path = row.session_path;
+  if (path === null || path.at(-1)?.sessionId !== row.provider_session_id) return undefined;
+  return path;
+}
+
+/** A row as a session: its path's last point is the row's own, the points before it its lineage. */
+function restoredSession(
+  row: WorkflowRunNodeSession,
+  legacyKey: string
+): Omit<NamedSessionHandle, 'producer'> {
+  const path = sessionPathOf(row) ?? [];
+  const own = path.at(-1);
+  return {
+    key: own?.key ?? legacyKey,
+    sessionId: row.provider_session_id,
+    provider: row.provider,
+    ...(own?.checkpoint !== undefined ? { checkpoint: own.checkpoint } : {}),
+    lineage: path.slice(0, -1),
   };
 }
 
@@ -132,15 +191,21 @@ function openPersistScope(
   return { key, sessionsAtStart };
 }
 
-/** Nodes whose provider session a `context: { resume }` node reads, loop_group bodies included. */
-function collectNamedResumeSources(nodes: readonly DagNode[]): Set<string> {
-  const sources = new Set<string>();
+/**
+ * Nodes on a named session's lineage, loop_group bodies included: each node that names a
+ * source in `context: { resume }`, and each source. A later node may continue any of them.
+ */
+function collectNamedSessionNodes(nodes: readonly DagNode[]): Set<string> {
+  const ids = new Set<string>();
   const collect = (level: readonly DagNode[]): void => {
     for (const node of level) {
-      if (isNodeContextResume(node.context)) sources.add(node.context.resume);
+      if (isNodeContextResume(node.context)) {
+        ids.add(node.context.resume);
+        ids.add(node.id);
+      }
       if (isLoopGroupNode(node)) collect(resolvedBodyNodes(node.loop_group));
     }
   };
   collect(nodes);
-  return sources;
+  return ids;
 }

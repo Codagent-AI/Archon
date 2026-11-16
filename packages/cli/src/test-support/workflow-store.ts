@@ -425,6 +425,7 @@ export function createInMemoryWorkflowStore(
         const prior = runSessions.get(key);
         runSessions.set(key, {
           ...input,
+          session_path: input.session_path ? structuredClone([...input.session_path]) : null,
           created_at: prior?.created_at ?? new Date().toISOString(),
           updated_at: new Date().toISOString(),
         });

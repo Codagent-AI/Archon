@@ -18,12 +18,8 @@ import type { InitializeParams } from '../codex/protocol/InitializeParams';
 import type { InitializeResponse } from '../codex/protocol/InitializeResponse';
 import type { ServerNotification } from '../codex/protocol/ServerNotification';
 import type { CodexErrorInfo } from '../codex/protocol/v2/CodexErrorInfo';
-import type { ConfigReadResponse } from '../codex/protocol/v2/ConfigReadResponse';
 import type { ListMcpServerStatusResponse } from '../codex/protocol/v2/ListMcpServerStatusResponse';
 import type { McpServerStatus } from '../codex/protocol/v2/McpServerStatus';
-import type { PluginInstalledResponse } from '../codex/protocol/v2/PluginInstalledResponse';
-import type { PluginReadResponse } from '../codex/protocol/v2/PluginReadResponse';
-import type { PluginSummary } from '../codex/protocol/v2/PluginSummary';
 import type { FileUpdateChange } from '../codex/protocol/v2/FileUpdateChange';
 import type { LoginAccountParams } from '../codex/protocol/v2/LoginAccountParams';
 import type { LoginAccountResponse } from '../codex/protocol/v2/LoginAccountResponse';
@@ -40,6 +36,11 @@ import type { TurnError } from '../codex/protocol/v2/TurnError';
 import type { TurnInterruptResponse } from '../codex/protocol/v2/TurnInterruptResponse';
 import type { TurnStartResponse } from '../codex/protocol/v2/TurnStartResponse';
 import type { TurnStatus } from '../codex/protocol/v2/TurnStatus';
+import {
+  configReadResponse,
+  pluginInstalledResponse,
+  pluginReadResponse,
+} from './codex-app-server-fake-scope';
 
 /** A request method, from the generated protocol: a renamed method fails type-check here. */
 type Method = ClientRequest['method'];
@@ -90,6 +91,8 @@ export interface FakeTurnScript {
   installedPlugins?: Record<string, string[]>;
   /** `mcpServerStatus/list` pages for the thread, in order (default: one empty page). */
   mcpStatusPages?: ServerStatus[][];
+  /** The id of the resumed thread's latest turn, as `thread/turns/list` reports it (default: none). */
+  latestTurnId?: string;
 }
 
 /** The `mcpServerStatus/list` fields a test sets; the rest are filled in. */
@@ -314,6 +317,18 @@ export function createFakeAppServer(script: () => FakeTurnScript = () => ({})): 
           send({ id, result: pluginReadResponse(pluginName, servers) });
           break;
         }
+        case 'thread/turns/list': {
+          const latest = turn.latestTurnId;
+          send({
+            id,
+            result: {
+              data: latest === undefined ? [] : [turnOf('completed', null, latest)],
+              nextCursor: null,
+              backwardsCursor: null,
+            },
+          });
+          break;
+        }
         case 'mcpServerStatus/list': {
           const pages = turn.mcpStatusPages ?? [[]];
           const { cursor } = params as { cursor?: string | null };
@@ -456,101 +471,6 @@ function threadResumeResponse(id: string): ThreadResumeResponse {
 function threadForkResponse(id: string, source: string): ThreadForkResponse {
   const response = threadStartResponse(id);
   return { ...response, thread: { ...response.thread, forkedFromId: source } };
-}
-
-function configReadResponse(servers: string[]): ConfigReadResponse {
-  return {
-    config: {
-      model: null,
-      review_model: null,
-      model_context_window: null,
-      model_auto_compact_token_limit: null,
-      model_auto_compact_token_limit_scope: null,
-      model_provider: null,
-      approval_policy: null,
-      approvals_reviewer: null,
-      sandbox_mode: null,
-      sandbox_workspace_write: null,
-      forced_chatgpt_workspace_id: null,
-      forced_login_method: null,
-      web_search: null,
-      tools: null,
-      instructions: null,
-      developer_instructions: null,
-      compact_prompt: null,
-      model_reasoning_effort: null,
-      model_reasoning_summary: null,
-      model_verbosity: null,
-      service_tier: null,
-      analytics: null,
-      apps: null,
-      browser_use: null,
-      computer_use: null,
-      desktop: null,
-      mcp_servers: Object.fromEntries(servers.map(name => [name, { command: name }])),
-    },
-    origins: {},
-    layers: null,
-  };
-}
-
-const FAKE_MARKETPLACE_PATH = '/home/user/.codex/marketplaces/fixture/marketplace.json';
-
-function pluginSummary(id: string): PluginSummary {
-  return {
-    id,
-    remotePluginId: null,
-    version: null,
-    localVersion: null,
-    name: id.split('@')[0],
-    shareContext: null,
-    source: { type: 'local', path: '/home/user/.codex/plugins/fixture' },
-    installed: true,
-    installedAt: null,
-    enabled: true,
-    installPolicy: 'AVAILABLE',
-    installPolicySource: null,
-    mustShowInstallationInterstitial: null,
-    authPolicy: 'ON_INSTALL',
-    availability: 'AVAILABLE',
-    disabledReason: null,
-    eligiblePlanTypes: null,
-    interface: null,
-    keywords: [],
-  };
-}
-
-function pluginInstalledResponse(plugins: Record<string, string[]>): PluginInstalledResponse {
-  return {
-    marketplaces: [
-      {
-        name: 'fixture',
-        path: FAKE_MARKETPLACE_PATH,
-        interface: null,
-        plugins: Object.keys(plugins).map(pluginSummary),
-      },
-    ],
-    marketplaceLoadErrors: [],
-  };
-}
-
-function pluginReadResponse(name: string, mcpServers: string[]): PluginReadResponse {
-  return {
-    plugin: {
-      marketplaceName: 'fixture',
-      marketplacePath: FAKE_MARKETPLACE_PATH,
-      summary: pluginSummary(`${name}@fixture`),
-      shareUrl: null,
-      description: null,
-      skills: [],
-      onboardingSkill: null,
-      hooks: [],
-      apps: [],
-      appTemplates: [],
-      mcpServers,
-      scheduledTasks: null,
-    },
-  };
 }
 
 function mcpStatusResponse(pages: ServerStatus[][], index: number): ListMcpServerStatusResponse {

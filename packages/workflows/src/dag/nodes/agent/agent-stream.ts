@@ -82,6 +82,8 @@ export interface AgentAttemptState {
   numTurns: number | undefined;
   resolvedModel: ResolvedModel | undefined;
   sessionId: string | undefined;
+  /** The provider's marker for the end of the session's latest turn, when it reports one. */
+  sessionCheckpoint: string | undefined;
   resumed: boolean | undefined;
   /** Always accumulated, whatever the streaming mode. */
   outputText: string;
@@ -113,6 +115,7 @@ export function createAttemptState(ctx: RunLayersContext, nodeId: string): Agent
     numTurns: undefined,
     resolvedModel: undefined,
     sessionId: undefined,
+    sessionCheckpoint: undefined,
     resumed: undefined,
     outputText: '',
     structuredOutput: undefined,
@@ -220,6 +223,7 @@ function resetPass(
   state.structuredOutput = undefined;
   if (pass.threadsSession) {
     state.sessionId = undefined;
+    state.sessionCheckpoint = undefined;
     state.resumed = undefined;
   }
   state.batchMessages.length = 0; // else a failed attempt's prose flushes during reask
@@ -393,6 +397,8 @@ function recordResult(
 ): void {
   if (pass.threadsSession) {
     state.sessionId = msg.sessionId;
+    // A later result of the same turn may omit it; the latest one reported stands.
+    if (msg.sessionCheckpoint !== undefined) state.sessionCheckpoint = msg.sessionCheckpoint;
     if (msg.resumed !== undefined) state.resumed = msg.resumed;
   }
   recordResultUsage(pc.node.id, state, msg);

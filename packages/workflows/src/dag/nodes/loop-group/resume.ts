@@ -3,7 +3,7 @@ import { ParentStatusReadError } from '../../../parent-status-read';
 import { BASE_COMPLETION_CHANNELS } from '../../../schemas/loop';
 import { resolveBashPath } from '@archon/git';
 import { executeWaitNode } from '../wait/wait';
-import { snapshotBodySessionCursorAncestry } from '../../pause';
+import { snapshotBodySessionCursorAncestry, snapshotBodySessionCursors } from '../../pause';
 import { nodeInvocationKey, parseNodeInvocationKey } from '../../../node-record-reader';
 import type { NodeInvocation } from '../../../schemas/node-execution';
 import type {
@@ -18,7 +18,7 @@ import {
   bodySessionCursorsSchema,
   bodySessionCursorAncestrySchema,
   type BodySessionCursorAncestry,
-  type SessionCursor,
+  type NamedSessionCursor,
 } from '../../../schemas';
 import {
   definedOutputPaths,
@@ -26,15 +26,18 @@ import {
   isApprovalContext,
   isNodeContextResume,
 } from '../../../schemas';
+import {
+  bodySessionIds,
+  namedSessionKey,
+  namedSessionOfCursor,
+  pathOf,
+  type NamedSession,
+} from '../../named-session';
 import { writeInvocationListings } from '../../../invocation-listings';
 import { substituteWorkflowVariables } from '../../../workflow-variables';
 import { detectCompletionSignal, stripCompletionTags } from '../../../executor-shared';
 import { safeSendMessage } from '../../../platform-messages';
-import {
-  ownsBodySessionCursor,
-  type RunLayersContext,
-  type SequentialSessionCursor,
-} from '../../run-context';
+import { type RunLayersContext, type SequentialSessionCursor } from '../../run-context';
 import { nodeTemplateReferences } from '../../references';
 import {
   findLoopGroupTerminalSuspendNode,
@@ -85,7 +88,7 @@ export function readLoopGroupResume(
     isLegacyInteractiveLoopResume || shape.isEscalatedGateResume || isEscalatedWaitResume;
   const resumeIteration = loopGateMeta?.iteration ?? loopOwnedWaitMeta?.iteration ?? 0;
   if (isLoopResume) progress.lastStartedIteration = resumeIteration;
-  const bodySessionCursors = restoreBodySessionCursors(node, bodyNodes, {
+  const bodySessionCursors = restoreBodySessionCursors(ctx, node, bodyNodes, {
     ...shape,
     isLoopResume,
     enclosingPauseFrame,
@@ -142,8 +145,8 @@ function hasIncompleteGroupCost(
 function withOwnCursors(
   ctx: RunLayersContext,
   ownerInvocationKey: string,
-  bodySessionCursors: Map<string, SessionCursor> | undefined
-): Map<string, Map<string, SessionCursor>> {
+  bodySessionCursors: Map<string, NamedSession> | undefined
+): Map<string, Map<string, NamedSession>> {
   const bodySessionCursorAncestry = new Map(ctx.bodySessionCursorAncestry);
   bodySessionCursorAncestry.set(ownerInvocationKey, bodySessionCursors ?? new Map());
   return bodySessionCursorAncestry;
@@ -248,52 +251,96 @@ function enclosingPauseFrameOf(
 }
 
 /**
- * Restore the owner sessions of body nodes that resume an enclosing source, from the
- * pause this run resumes or an enclosing group's pause frame. Undefined when no body node
- * resumes a session context; a group whose consumers all resume same-body sources still
- * returns an (empty) map so a nested pause resumes inside the paused iteration.
+ * Restore the latest named session of each body node on a session lineage (see
+ * {@link bodySessionIds}), from the pause this run resumes or an enclosing group's pause
+ * frame. Undefined when no body node is on one; otherwise a map, so a nested pause resumes
+ * inside the paused iteration. A fresh invocation starts with what the group's earlier
+ * invocations left in the enclosing group.
  */
 function restoreBodySessionCursors(
+  ctx: RunLayersContext,
   node: LoopGroupNode,
   bodyNodes: readonly DagNode[],
   shape: ResumeShape & {
     isLoopResume: boolean;
     enclosingPauseFrame: { iteration: number } | undefined;
   }
-): Map<string, SessionCursor> | undefined {
-  if (!bodyNodes.some(n => isNodeContextResume(n.context))) return undefined;
-  const bodyNodeIds = new Set(bodyNodes.map(n => n.id));
-  const ownerIds = new Set(
-    bodyNodes.filter(n => ownsBodySessionCursor(n, bodyNodeIds)).map(n => n.id)
-  );
-  const bodySessionCursors = new Map<string, SessionCursor>();
+): Map<string, NamedSession> | undefined {
+  const participants = bodySessionIds(bodyNodes, ctx.namedSessionNodeIds ?? new Set());
+  if (participants.size === 0) return undefined;
   if (shape.rawLoopWait && !shape.isEscalatedWaitResume) {
     throw new Error(
-      `Loop group '${node.id}' cannot restore named owner sessions: invalid loop wait state.`
+      `Loop group '${node.id}' cannot restore named body sessions: invalid loop wait state.`
     );
   }
-  const restoredOwnerCursors = shape.restoredAncestry?.[shape.ownerInvocationKey];
+  const restoredCursors = shape.restoredAncestry?.[shape.ownerInvocationKey];
   if (
     !shape.isLoopResume &&
-    restoredOwnerCursors === undefined &&
+    restoredCursors === undefined &&
     shape.enclosingPauseFrame === undefined
   ) {
-    return bodySessionCursors;
+    return earlierInvocationSessions(ctx, node, participants);
   }
+  const bodySessionCursors = new Map<string, NamedSession>();
   const parsed = bodySessionCursorsSchema.safeParse(
-    restoredOwnerCursors ?? pausedBodySessionCursors(shape)
+    restoredCursors ?? pausedBodySessionCursors(shape)
   );
   if (!parsed.success) {
     throw new Error(
-      `Loop group '${node.id}' cannot restore named owner sessions: missing or invalid bodySessionCursors.`
+      `Loop group '${node.id}' cannot restore named body sessions: missing or invalid bodySessionCursors.`
     );
   }
   for (const [id, cursor] of Object.entries(parsed.data)) {
-    if (!ownerIds.has(id))
-      throw new Error(`Loop group '${node.id}' has an unknown restored session owner '${id}'.`);
-    bodySessionCursors.set(id, cursor);
+    const bodyNode = participants.get(id);
+    if (bodyNode === undefined)
+      throw new Error(`Loop group '${node.id}' restored a session for unknown body node '${id}'.`);
+    bodySessionCursors.set(id, restoredBodySession(ctx, node, bodyNode, cursor));
   }
   return bodySessionCursors;
+}
+
+/**
+ * The body sessions a nested group's earlier invocations handed to the enclosing group, under
+ * this group's id, so each body node keeps to its own branch across enclosing iterations.
+ * Empty for a group no loop_group encloses.
+ */
+function earlierInvocationSessions(
+  ctx: RunLayersContext,
+  node: LoopGroupNode,
+  participants: ReadonlyMap<string, DagNode>
+): Map<string, NamedSession> {
+  const prefix = `${node.id}.`;
+  const sessions = new Map<string, NamedSession>();
+  for (const [id, session] of ctx.bodySessionCursors ?? []) {
+    const bodyId = id.slice(prefix.length);
+    if (id.startsWith(prefix) && participants.has(bodyId)) sessions.set(bodyId, session);
+  }
+  return sessions;
+}
+
+/**
+ * A saved body session. A pause an older binary saved holds only the sessions of body nodes
+ * that named a source outside the body, without lineage: each one continued that source, so
+ * it gets the source's path, and a key no iteration produces, so it counts as earlier than
+ * every iteration.
+ */
+function restoredBodySession(
+  ctx: RunLayersContext,
+  node: LoopGroupNode,
+  bodyNode: DagNode,
+  cursor: NamedSessionCursor
+): NamedSession {
+  if (cursor.key !== undefined) return namedSessionOfCursor(cursor, cursor.key);
+  const source = isNodeContextResume(bodyNode.context)
+    ? ctx.nodeSessionHandles?.get(bodyNode.context.resume)
+    : undefined;
+  return {
+    ...namedSessionOfCursor(
+      cursor,
+      namedSessionKey([...ctx.loopGroupPath, { groupId: node.id, iteration: 0 }], bodyNode.id)
+    ),
+    lineage: source === undefined ? [] : pathOf(source),
+  };
 }
 
 /** The cursors the resumed pause itself recorded, before ancestry snapshots existed. */
@@ -365,9 +412,7 @@ export async function resumeTerminalWait(
       iteration: resumeIteration,
       sessionId: loopOwnedWaitMeta?.sessionId ?? null,
       sessionProvider: loopOwnedWaitMeta?.sessionProvider ?? null,
-      ...(bodySessionCursors !== undefined
-        ? { bodySessionCursors: Object.fromEntries(bodySessionCursors) }
-        : {}),
+      ...snapshotBodySessionCursors(bodySessionCursors),
       ...snapshotBodySessionCursorAncestry(resume.bodySessionCursorAncestry),
     }
   );

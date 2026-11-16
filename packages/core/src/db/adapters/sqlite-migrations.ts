@@ -154,6 +154,12 @@ const sqliteMigrations: readonly Migration[] = [
     failureEvent: 'db.sqlite_migration_state_revisions_columns_failed',
     apply: addStateRevisionColumns,
   },
+  {
+    kind: 'tolerated',
+    scope: 'schema',
+    failureEvent: 'db.sqlite_migration_run_node_sessions_columns_failed',
+    apply: addRunNodeSessionPathColumn,
+  },
   { kind: 'required', scope: 'schema', apply: alignEventArchiveColumns },
 ];
 
@@ -452,6 +458,13 @@ function addStateRevisionColumns(db: Database): void {
   for (const column of ['writer_via', 'lease_run_id', 'lease_node_path', 'lease_taken_at'])
     if (!cols.has(column))
       db.run(`ALTER TABLE remote_agent_state_revisions ADD COLUMN ${column} TEXT`);
+}
+
+// Nullable: rows written before it existed have no named-session lineage.
+function addRunNodeSessionPathColumn(db: Database): void {
+  const cols = columnNames(db, 'remote_agent_workflow_run_node_sessions');
+  if (cols.size && !cols.has('session_path'))
+    db.run('ALTER TABLE remote_agent_workflow_run_node_sessions ADD COLUMN session_path TEXT');
 }
 
 // The archive trigger copies an event row by position, and CREATE TABLE AS ran

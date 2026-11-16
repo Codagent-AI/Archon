@@ -490,7 +490,7 @@ async function createRunContext(
     priorUsage,
     workflowSourceRoots,
   } = options;
-  const { nodeOutputs, persistScope, namedResumeSourceIds, nodeSessionHandles } = restored;
+  const { nodeOutputs, persistScope, namedSessionNodeIds, nodeSessionHandles } = restored;
   const workflowRef = selectModelRef(workflow.model, aiProfile);
   const workflowTier = workflowRef && isTierName(workflowRef) ? workflowRef : undefined;
   // A budget always seeds from the run's own rows, never from `priorUsage`: a re-driven
@@ -560,7 +560,8 @@ async function createRunContext(
     priorCompletedNodes,
     replayedFailures,
     nodeSessionHandles,
-    namedResumeSourceIds,
+    namedSessionNodeIds,
+    sessionsContinuedInPlace: new Set<string>(),
     lastSequentialSession: undefined,
     warnedProviderConflicts: new Set<string>(),
     totalCostUsd: priorUsage?.costUsd,

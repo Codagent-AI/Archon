@@ -913,11 +913,17 @@ nodes:
             additionalProperties: false
 ```
 
-The owner's first executed turn immutably forks `implement`, preserving the source.
-Subsequent iterations continue that private branch with the same session ID. Reviewers
-start fresh and cannot replace the owner's cursor. Explicit named ownership also wins
-over `fresh_context` and parallel-layer resets. Multiple owners fork separate branches;
-a skipped owner keeps its cursor, or waits to fork until its first executed turn.
+The owner's first turn continues `implement`'s conversation, and each later iteration
+continues it from where the previous iteration left it: earlier iterations count as
+dependencies of every body node. Reviewers start fresh and add nothing to it. A named
+session also wins over `fresh_context` and parallel-layer resets. Two parallel owners that
+both name `implement` each keep their own branch across iterations, unless a body node that
+depends on both also names `implement`: that node resolves their branches, and in the next
+iteration each owner continues its conversation. A skipped owner adds nothing in that
+iteration and keeps its conversation for the next. When the group
+completes, a node after it that names `implement` continues the conversation the owner
+left. How the provider continues it (in place or by a fork) is described under
+[Named session context](/reference/workflow-language/#named-session-context).
 
 The source must be a command, prompt, or plain `loop:` node in an enclosing scope with
 a dependency path proving it completes before the group starts. Unordered, non-session,
@@ -926,12 +932,13 @@ owner then continues the session of the node the included workflow returns (its
 `returns:` node, or its first sink), which must itself be a command, prompt, or plain
 `loop:` node. An include whose returned node produces no session is rejected at load,
 as is an include with `fan_out:`, which has no single session. A source in the same body works differently; see
-[Same-iteration sessions](#same-iteration-sessions). Nested groups get separate owner
-cursors for each enclosing invocation. Nested pauses retain every enclosing
-owner cursor and resume within the paused enclosing iteration before advancing.
-The resolved provider must match the source and
-support session resume and immutable forks. Missing context or a replacement owner
-session ID fails the node rather than starting a new conversation.
+[Same-iteration sessions](#same-iteration-sessions). A completed nested group's body
+sessions become the enclosing group's, so the nested group's next invocation continues
+each body node's branch, and a node after the enclosing group continues them too. Nested
+pauses retain every enclosing group's body sessions and resume within the paused
+enclosing iteration before advancing.
+The resolved provider must match the source and support session resume and forks.
+Missing context fails the node rather than starting a new conversation.
 
 ### Same-iteration sessions
 
@@ -960,10 +967,10 @@ nodes:
           prompt: You did not write review.md. Write it now from your review.
 ```
 
-In each iteration, `follow-up` forks that iteration's `work` session. It never continues
-its own branch from an earlier iteration, and it has no owner cursor. The fork contract is
-the same as for any named resume: the source session stays unchanged, the providers must
-match and support immutable forks, and a missing source handle fails the node.
+In each iteration, `follow-up` continues that iteration's `work` session. It never
+continues its own branch from an earlier iteration. Otherwise it behaves like any named
+resume: the providers must match and support forks, and a missing source handle fails the
+node.
 
 The source must be a command, prompt, or plain `loop:` node transitively upstream of the
 consumer within the body. A body node that is not upstream, a node in a different
@@ -989,14 +996,14 @@ Suspension and failure have different recovery rules:
   iteration resolve to the prior iteration's real body outputs, restored from
   the persisted run history — the same as an un-paused next iteration would
   have seen.
-- **Named owners after suspension**: terminal body waits and the deprecated
-  interactive and approval gates persist private owner cursors independently of the ambient
-  cursor. The next iteration continues each owner even with `fresh_context: true`.
-  Missing or invalid owner state fails restoration. A wait that suspends again retains
-  the same snapshot.
+- **Named sessions after suspension**: terminal body waits and the deprecated
+  interactive and approval gates persist every body node's latest named session,
+  independently of the ambient cursor. The next iteration continues them even with
+  `fresh_context: true`. Missing or invalid session state fails restoration. A wait that
+  suspends again retains the same snapshot.
 - **Same-iteration sessions after a nested pause**: a nested group's pause between a
   same-body source and its consumer resumes within the paused iteration, which re-runs
-  the source. The consumer forks the re-run, matching the `$source.output` it reads.
+  the source. The consumer continues the re-run, matching the `$source.output` it reads.
 - **Failure resume** (`/workflow resume <id>` after a crash/failure): there is
   no persisted iteration cursor — the loop_group node restarts from
   **iteration 1**. Per-body-node resume granularity is not supported in v1.
@@ -1009,7 +1016,7 @@ Suspension and failure have different recovery rules:
   [`until_field`](#until_field).
 - `retry` (the loop manages its own iteration) — rejected at parse time.
 - Cross-run `persist_session` for body AI nodes. In-run iterations use the ambient
-  cursor governed by `fresh_context`, or explicit named owner cursors described above.
+  cursor governed by `fresh_context`, or the named sessions described above.
 - Per-body-node resume (skip-to-failed-body-node) — the whole iteration re-runs.
 - `$LOOP_PREV.<id>.output[N]` history indexing — only the immediately prior
   iteration is reachable.

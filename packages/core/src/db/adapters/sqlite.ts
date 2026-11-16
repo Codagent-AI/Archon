@@ -664,6 +664,7 @@ export class SqliteAdapter implements IDatabase {
         node_id TEXT NOT NULL,
         provider TEXT NOT NULL,
         provider_session_id TEXT NOT NULL,
+        session_path TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now')),
         PRIMARY KEY (workflow_run_id, node_id)

@@ -127,6 +127,10 @@
         "resumed": {
           "type": "boolean"
         },
+        "sessionCheckpoint": {
+          "type": "string",
+          "minLength": 1
+        },
         "sessionNotFound": {
           "type": "boolean",
           "const": true
@@ -671,6 +675,10 @@
             "resumed": {
               "type": "boolean"
             },
+            "sessionCheckpoint": {
+              "type": "string",
+              "minLength": 1
+            },
             "sessionNotFound": {
               "type": "boolean",
               "const": true
@@ -1207,6 +1215,10 @@
         },
         "forkSession": {
           "type": "boolean"
+        },
+        "sessionCheckpoint": {
+          "type": "string",
+          "minLength": 1
         },
         "purpose": {
           "type": "string",
