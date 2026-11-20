@@ -203,6 +203,140 @@ describe('GET /api/runs/:runId/artifacts', () => {
     expect(body.files.map(f => f.path)).toEqual(['out.md']);
   });
 
+  test.each(['page.html', 'page.HTM'])('serves %s as a sandboxed HTML page', async name => {
+    const runId = 'run-serve-html';
+    const dir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs', runId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, name), '<p>hi</p>');
+    mockGetWorkflowRun.mockImplementationOnce(async () => ({
+      ...MOCK_RUNNING_RUN,
+      id: runId,
+      codebase_id: 'cb-local',
+    }));
+    mockGetCodebase.mockImplementationOnce(async () => ({
+      name: 'workspace',
+      kind: 'repo',
+      default_cwd: '/home/u/workspace',
+    }));
+    const { app } = makeApp();
+    const response = await app.request(`http://localhost:3090/api/artifacts/${runId}/${name}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    const csp = response.headers.get('content-security-policy') ?? '';
+    expect(csp).toContain('sandbox allow-scripts allow-popups');
+    expect(csp).not.toContain('allow-same-origin');
+    expect(csp).not.toContain('allow-forms');
+    // No connect-src, so default-src 'none' keeps the page off Archon's API.
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).not.toContain('connect-src');
+    expect(csp).toContain("form-action 'none'");
+    expect(csp).toContain(`img-src data: http://localhost:3090/api/artifacts/${runId}/`);
+    expect(await response.text()).toBe('<p>hi</p>');
+  });
+
+  async function requestPage(base: string, headers: Record<string, string>): Promise<Response> {
+    const runId = 'run-serve-page';
+    const dir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs', runId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'page.html'), '<p>hi</p>');
+    mockGetWorkflowRun.mockImplementationOnce(async () => ({
+      ...MOCK_RUNNING_RUN,
+      id: runId,
+      codebase_id: 'cb-local',
+    }));
+    mockGetCodebase.mockImplementationOnce(async () => ({
+      name: 'workspace',
+      kind: 'repo',
+      default_cwd: '/home/u/workspace',
+    }));
+    const { app } = makeApp();
+    return app.request(`${base}/api/artifacts/${runId}/page.html`, { headers });
+  }
+
+  test.each([
+    ['the request', 'http://127.0.0.1:4000', {}, 'http://127.0.0.1:4000'],
+    [
+      'the Vite dev proxy',
+      'http://localhost:3090',
+      { 'X-Forwarded-Host': 'localhost:5173', 'X-Forwarded-Proto': 'http' },
+      'http://localhost:5173',
+    ],
+    [
+      'an HTTPS proxy chain',
+      'http://10.0.0.5:3090',
+      { 'X-Forwarded-Host': 'archon.example, 10.0.0.2', 'X-Forwarded-Proto': 'https, http' },
+      'https://archon.example',
+    ],
+  ])('takes the page origin from %s', async (_source, base, headers, origin) => {
+    const response = await requestPage(base, headers);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-security-policy')).toContain(
+      `img-src data: ${origin}/api/artifacts/run-serve-page/`
+    );
+  });
+
+  test('refuses an HTML page whose host cannot go in a policy', async () => {
+    const response = await requestPage('http://localhost:3090', { 'X-Forwarded-Host': 'a;b' });
+    expect(response.status).toBe(400);
+  });
+
+  test.each([
+    ['shots/step-01.png', 'image/png'],
+    ['photo.JPG', 'image/jpeg'],
+  ])('serves %s byte for byte as %s', async (name, type) => {
+    const runId = 'run-serve-image';
+    const dir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs', runId);
+    await mkdir(join(dir, 'shots'), { recursive: true });
+    // Not valid UTF-8, so a text read would corrupt it.
+    const bytes = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0xc3,
+    ]);
+    await writeFile(join(dir, name), bytes);
+    mockGetWorkflowRun.mockImplementationOnce(async () => ({
+      ...MOCK_RUNNING_RUN,
+      id: runId,
+      codebase_id: 'cb-local',
+    }));
+    mockGetCodebase.mockImplementationOnce(async () => ({
+      name: 'workspace',
+      kind: 'repo',
+      default_cwd: '/home/u/workspace',
+    }));
+    const { app } = makeApp();
+    const response = await app.request(`http://localhost:3090/api/artifacts/${runId}/${name}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe(type);
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(response.headers.get('content-security-policy')).toBeNull();
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
+  });
+
+  test.each([
+    ['a.md', 'text/markdown; charset=utf-8'],
+    // SVG can carry script, so it stays text.
+    ['logo.svg', 'text/plain; charset=utf-8'],
+  ])('serves %s as %s with no CSP', async (name, type) => {
+    const runId = 'run-serve-nocsp';
+    const dir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs', runId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, name), '<svg><script>alert(1)</script></svg>');
+    mockGetWorkflowRun.mockImplementation(async () => ({
+      ...MOCK_RUNNING_RUN,
+      id: runId,
+      codebase_id: 'cb-local',
+    }));
+    mockGetCodebase.mockImplementation(async () => ({
+      name: 'workspace',
+      kind: 'repo',
+      default_cwd: '/home/u/workspace',
+    }));
+    const { app } = makeApp();
+    const response = await app.request(`/api/artifacts/${runId}/${name}`);
+    expect(response.headers.get('content-type')).toBe(type);
+    expect(response.headers.get('content-security-policy')).toBeNull();
+  });
+
   test('an out-of-tree output_root falls through to re-derivation, keeping the tree relocatable', async () => {
     // Durability, not just correctness: move ARCHON_HOME (machine migration,
     // restored backup, the ARCHON_DATA split) and EVERY stamped root is
@@ -343,7 +477,7 @@ describe('GET /api/artifacts/:runId/* storage-key resolution', () => {
     );
     try {
       const response = await app.request(`/api/artifacts/${runId}/report.md`);
-      expect(read).toHaveBeenCalledWith(resolvedTarget, 'utf-8');
+      expect(read).toHaveBeenCalledWith(resolvedTarget);
       expect(response.status).toBe(status);
       expect(await response.json()).toEqual({
         error: code === 'ENOENT' ? 'Artifact file not found' : 'Failed to read artifact file',
@@ -370,6 +504,11 @@ describe('GET /api/artifacts/:runId/* storage-key resolution', () => {
       content: {
         'text/plain': { schema: { type: 'string' } },
         'text/markdown': { schema: { type: 'string' } },
+        'text/html': { schema: { type: 'string' } },
+        'image/png': { schema: { type: 'string', format: 'binary' } },
+        'image/jpeg': { schema: { type: 'string', format: 'binary' } },
+        'image/gif': { schema: { type: 'string', format: 'binary' } },
+        'image/webp': { schema: { type: 'string', format: 'binary' } },
       },
     });
     for (const status of ['400', '404', '500']) {

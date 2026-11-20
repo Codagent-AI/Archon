@@ -1,7 +1,7 @@
 import { type OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
 import type { Context } from 'hono';
 import { readFile, readdir, realpath, stat } from 'fs/promises';
-import { normalize, join } from 'path';
+import { extname, normalize, join } from 'path';
 import {
   getRunArtifactsDirForRoot,
   isRunArtifactsEngineEntry,
@@ -65,6 +65,21 @@ const listRunArtifactsRoute = createRoute({
   },
 });
 
+// Raster images an HTML artifact can show. SVG is left out because it can carry script.
+const IMAGE_CONTENT_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+};
+const IMAGE_RESPONSES = Object.fromEntries(
+  [...new Set(Object.values(IMAGE_CONTENT_TYPES))].map(type => [
+    type,
+    { schema: z.string().openapi({ format: 'binary' }) },
+  ])
+);
+
 const getArtifactContentRoute = createRoute({
   method: 'get',
   path: '/api/artifacts/{runId}/{filename}',
@@ -85,6 +100,8 @@ const getArtifactContentRoute = createRoute({
       content: {
         'text/plain': { schema: z.string() },
         'text/markdown': { schema: z.string() },
+        'text/html': { schema: z.string() },
+        ...IMAGE_RESPONSES,
       },
     },
     400: jsonError('Invalid artifact path or filename'),
@@ -314,9 +331,9 @@ async function serveArtifactFile(
     return apiError(c, 404, 'Artifact file not found');
   }
 
-  let content: string;
+  let bytes: Buffer;
   try {
-    content = await readFile(realFilePath, 'utf-8');
+    bytes = await readFile(realFilePath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       return apiError(c, 404, 'Artifact file not found');
@@ -325,11 +342,74 @@ async function serveArtifactFile(
     return apiError(c, 500, 'Failed to read artifact file');
   }
 
+  const lower = filename.toLowerCase();
+  const imageType = IMAGE_CONTENT_TYPES[extname(lower)];
+  if (imageType) {
+    return new Response(bytes, {
+      status: 200,
+      headers: { 'Content-Type': imageType, 'X-Content-Type-Options': 'nosniff' },
+    });
+  }
+
+  const content = bytes.toString('utf-8');
+  if (lower.endsWith('.html') || lower.endsWith('.htm')) {
+    return htmlPage(c, runId, content);
+  }
+
   const contentType = filename.endsWith('.md')
     ? 'text/markdown; charset=utf-8'
     : 'text/plain; charset=utf-8';
   return new Response(content, {
     status: 200,
     headers: { 'Content-Type': contentType },
+  });
+}
+
+// The origin the browser loaded the page from. A proxy in front of the server,
+// such as the Vite dev server or one that handles HTTPS, reports it in
+// X-Forwarded-Host and X-Forwarded-Proto. A browser can't set those headers on
+// a page load, so a sender can only change the policy of the page it gets back.
+function pageOrigin(c: Context): string | null {
+  const forwarded = (name: string): string | undefined =>
+    c.req.header(name)?.split(',')[0]?.trim() || undefined;
+  let url: URL;
+  try {
+    url = new URL(c.req.url);
+  } catch {
+    return null;
+  }
+  const proto = forwarded('x-forwarded-proto') ?? url.protocol.slice(0, -1);
+  const host = forwarded('x-forwarded-host') ?? url.host;
+  if (!/^https?$/.test(proto) || !/^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(:\d+)?$/.test(host)) {
+    return null;
+  }
+  return `${proto}://${host}`;
+}
+
+// Agent-written page: sandbox it into an opaque origin (no allow-same-origin)
+// so it cannot read Archon's cookies or same-origin state. It may not call
+// Archon's API or submit forms: default-src covers connect-src, and
+// form-action is 'none'. It may load Google Fonts, and images from its own
+// run's artifacts, named by full URL because 'self' is unreliable for an
+// opaque origin. Links may open new tabs, which leave the sandbox.
+function htmlPage(c: Context, runId: string, content: string): Response {
+  const origin = pageOrigin(c);
+  if (!origin) return apiError(c, 400, 'Invalid Host header');
+  const csp = [
+    'sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox',
+    "default-src 'none'",
+    "script-src 'unsafe-inline'",
+    "style-src 'unsafe-inline' https://fonts.googleapis.com",
+    'font-src https://fonts.gstatic.com',
+    `img-src data: ${origin}/api/artifacts/${encodeURIComponent(runId)}/`,
+    "form-action 'none'",
+  ].join('; ');
+  return new Response(content, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Security-Policy': csp,
+      'X-Content-Type-Options': 'nosniff',
+    },
   });
 }

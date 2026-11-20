@@ -57,6 +57,8 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: `http://localhost:${apiPort}`,
           changeOrigin: true,
+          // Pass the browser's host on, so an HTML artifact's policy names this origin.
+          xfwd: true,
         },
       },
     },
