@@ -85,6 +85,7 @@ const getArtifactContentRoute = createRoute({
       content: {
         'text/plain': { schema: z.string() },
         'text/markdown': { schema: z.string() },
+        'text/html': { schema: z.string() },
       },
     },
     400: jsonError('Invalid artifact path or filename'),
@@ -323,6 +324,35 @@ async function serveArtifactFile(
     }
     getLog().error({ err, runId, filename }, 'artifacts.read_failed');
     return apiError(c, 500, 'Failed to read artifact file');
+  }
+
+  const lower = filename.toLowerCase();
+  if (lower.endsWith('.html') || lower.endsWith('.htm')) {
+    // Agent-written page: sandbox it into an opaque origin (no allow-same-origin)
+    // so it cannot read Archon's cookies or same-origin state. An opaque origin
+    // can't be matched reliably by 'self', so name this server's origin
+    // explicitly for connect-src/form-action. Its /api/* calls are cross-origin
+    // (Origin: null) and rely on the CORS policy in api.ts. Links may open new
+    // tabs, which leave the sandbox, and the page may load Google Fonts.
+    const origin = new URL(c.req.url).origin;
+    const csp = [
+      'sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox',
+      "default-src 'none'",
+      "script-src 'unsafe-inline'",
+      "style-src 'unsafe-inline' https://fonts.googleapis.com",
+      'font-src https://fonts.gstatic.com',
+      'img-src data:',
+      `connect-src ${origin}`,
+      `form-action ${origin}`,
+    ].join('; ');
+    return new Response(content, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Security-Policy': csp,
+        'X-Content-Type-Options': 'nosniff',
+      },
+    });
   }
 
   const contentType = filename.endsWith('.md')

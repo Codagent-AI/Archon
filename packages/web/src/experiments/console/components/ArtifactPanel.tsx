@@ -165,7 +165,49 @@ interface ViewerProps {
 const REMARK_PLUGINS = [remarkGfm, remarkBreaks];
 const REHYPE_PLUGINS = [rehypeHighlight];
 
+function artifactUrlFor(runId: string, path: string): string {
+  return `/api/artifacts/${encodeURIComponent(runId)}/${path
+    .split('/')
+    .map(encodeURIComponent)
+    .join('/')}`;
+}
+
 function ArtifactViewer({ runId, path }: ViewerProps): ReactElement {
+  const isHtml = /\.html?$/i.test(path);
+  const artifactUrl = artifactUrlFor(runId, path);
+  return (
+    <>
+      <header className="flex shrink-0 items-center justify-between border-b border-border bg-surface px-6 py-2">
+        <span className="truncate font-mono text-console-12 text-text-primary">{path}</span>
+        <a
+          href={artifactUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="shrink-0 font-mono text-console-10 text-text-tertiary transition-colors hover:text-text-primary"
+        >
+          {isHtml ? 'open page ↗' : 'open raw ↗'}
+        </a>
+      </header>
+      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+        {isHtml ? (
+          // HTML artifacts are sandboxed pages, not text: link to the served page.
+          <a
+            href={artifactUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="font-mono text-console-12 text-text-primary underline"
+          >
+            Open page
+          </a>
+        ) : (
+          <ArtifactText runId={runId} path={path} />
+        )}
+      </div>
+    </>
+  );
+}
+
+function ArtifactText({ runId, path }: ViewerProps): ReactElement | null {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -190,39 +232,21 @@ function ArtifactViewer({ runId, path }: ViewerProps): ReactElement {
   const basename = path.split('/').pop() ?? path;
   const isMarkdown = basename.endsWith('.md') || basename.endsWith('.mdx');
 
-  return (
-    <>
-      <header className="flex shrink-0 items-center justify-between border-b border-border bg-surface px-6 py-2">
-        <span className="truncate font-mono text-console-12 text-text-primary">{path}</span>
-        <a
-          href={`/api/artifacts/${encodeURIComponent(runId)}/${path
-            .split('/')
-            .map(encodeURIComponent)
-            .join('/')}`}
-          target="_blank"
-          rel="noreferrer"
-          className="shrink-0 font-mono text-console-10 text-text-tertiary transition-colors hover:text-text-primary"
-        >
-          open raw ↗
-        </a>
-      </header>
-      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
-        {loading ? (
-          <p className="font-mono text-console-12 text-text-tertiary">Loading…</p>
-        ) : error !== null ? (
-          <p className="font-mono text-console-12 text-error">{error}</p>
-        ) : content === null ? null : isMarkdown ? (
-          <div className="chat-markdown max-w-205 text-console-13 leading-relaxed text-text-primary">
-            <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
-              {content}
-            </ReactMarkdown>
-          </div>
-        ) : (
-          <pre className="max-w-275 whitespace-pre-wrap break-words font-mono text-console-12 leading-relaxed text-text-primary">
-            {content}
-          </pre>
-        )}
+  if (loading) return <p className="font-mono text-console-12 text-text-tertiary">Loading…</p>;
+  if (error !== null) return <p className="font-mono text-console-12 text-error">{error}</p>;
+  if (content === null) return null;
+  if (isMarkdown) {
+    return (
+      <div className="chat-markdown max-w-205 text-console-13 leading-relaxed text-text-primary">
+        <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
+          {content}
+        </ReactMarkdown>
       </div>
-    </>
+    );
+  }
+  return (
+    <pre className="max-w-275 whitespace-pre-wrap break-words font-mono text-console-12 leading-relaxed text-text-primary">
+      {content}
+    </pre>
   );
 }

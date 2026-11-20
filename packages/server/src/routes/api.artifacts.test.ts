@@ -203,6 +203,56 @@ describe('GET /api/runs/:runId/artifacts', () => {
     expect(body.files.map(f => f.path)).toEqual(['out.md']);
   });
 
+  test.each(['page.html', 'page.HTM'])('serves %s as a sandboxed HTML page', async name => {
+    const runId = 'run-serve-html';
+    const dir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs', runId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, name), '<p>hi</p>');
+    mockGetWorkflowRun.mockImplementationOnce(async () => ({
+      ...MOCK_RUNNING_RUN,
+      id: runId,
+      codebase_id: 'cb-local',
+    }));
+    mockGetCodebase.mockImplementationOnce(async () => ({
+      name: 'workspace',
+      kind: 'repo',
+      default_cwd: '/home/u/workspace',
+    }));
+    const { app } = makeApp();
+    const response = await app.request(`http://localhost:3090/api/artifacts/${runId}/${name}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    const csp = response.headers.get('content-security-policy') ?? '';
+    expect(csp).toContain('sandbox allow-scripts allow-forms allow-popups');
+    expect(csp).not.toContain('allow-same-origin');
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain('connect-src http://localhost:3090');
+    expect(csp).toContain('form-action http://localhost:3090');
+    expect(await response.text()).toBe('<p>hi</p>');
+  });
+
+  test('markdown and text artifacts carry no CSP', async () => {
+    const runId = 'run-serve-nocsp';
+    const dir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs', runId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'a.md'), '# a');
+    mockGetWorkflowRun.mockImplementation(async () => ({
+      ...MOCK_RUNNING_RUN,
+      id: runId,
+      codebase_id: 'cb-local',
+    }));
+    mockGetCodebase.mockImplementation(async () => ({
+      name: 'workspace',
+      kind: 'repo',
+      default_cwd: '/home/u/workspace',
+    }));
+    const { app } = makeApp();
+    const response = await app.request(`/api/artifacts/${runId}/a.md`);
+    expect(response.headers.get('content-type')).toBe('text/markdown; charset=utf-8');
+    expect(response.headers.get('content-security-policy')).toBeNull();
+  });
+
   test('an out-of-tree output_root falls through to re-derivation, keeping the tree relocatable', async () => {
     // Durability, not just correctness: move ARCHON_HOME (machine migration,
     // restored backup, the ARCHON_DATA split) and EVERY stamped root is
@@ -370,6 +420,7 @@ describe('GET /api/artifacts/:runId/* storage-key resolution', () => {
       content: {
         'text/plain': { schema: { type: 'string' } },
         'text/markdown': { schema: { type: 'string' } },
+        'text/html': { schema: { type: 'string' } },
       },
     });
     for (const status of ['400', '404', '500']) {

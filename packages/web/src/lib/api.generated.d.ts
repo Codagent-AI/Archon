@@ -3792,6 +3792,7 @@ export interface paths {
           content: {
             'text/plain': string;
             'text/markdown': string;
+            'text/html': string;
           };
         };
         /** @description Invalid artifact path or filename */
