@@ -229,7 +229,39 @@ describe('GET /api/runs/:runId/artifacts', () => {
     expect(csp).toContain("default-src 'none'");
     expect(csp).toContain('connect-src http://localhost:3090');
     expect(csp).toContain('form-action http://localhost:3090');
+    expect(csp).toContain('img-src data: http://localhost:3090');
     expect(await response.text()).toBe('<p>hi</p>');
+  });
+
+  test.each([
+    ['shots/step-01.png', 'image/png'],
+    ['photo.JPG', 'image/jpeg'],
+  ])('serves %s byte for byte as %s', async (name, type) => {
+    const runId = 'run-serve-image';
+    const dir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs', runId);
+    await mkdir(join(dir, 'shots'), { recursive: true });
+    // Not valid UTF-8, so a text read would corrupt it.
+    const bytes = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0xc3,
+    ]);
+    await writeFile(join(dir, name), bytes);
+    mockGetWorkflowRun.mockImplementationOnce(async () => ({
+      ...MOCK_RUNNING_RUN,
+      id: runId,
+      codebase_id: 'cb-local',
+    }));
+    mockGetCodebase.mockImplementationOnce(async () => ({
+      name: 'workspace',
+      kind: 'repo',
+      default_cwd: '/home/u/workspace',
+    }));
+    const { app } = makeApp();
+    const response = await app.request(`http://localhost:3090/api/artifacts/${runId}/${name}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe(type);
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(response.headers.get('content-security-policy')).toBeNull();
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
   });
 
   test('markdown and text artifacts carry no CSP', async () => {
@@ -393,7 +425,7 @@ describe('GET /api/artifacts/:runId/* storage-key resolution', () => {
     );
     try {
       const response = await app.request(`/api/artifacts/${runId}/report.md`);
-      expect(read).toHaveBeenCalledWith(resolvedTarget, 'utf-8');
+      expect(read).toHaveBeenCalledWith(resolvedTarget);
       expect(response.status).toBe(status);
       expect(await response.json()).toEqual({
         error: code === 'ENOENT' ? 'Artifact file not found' : 'Failed to read artifact file',
@@ -421,6 +453,10 @@ describe('GET /api/artifacts/:runId/* storage-key resolution', () => {
         'text/plain': { schema: { type: 'string' } },
         'text/markdown': { schema: { type: 'string' } },
         'text/html': { schema: { type: 'string' } },
+        'image/png': { schema: { type: 'string', format: 'binary' } },
+        'image/jpeg': { schema: { type: 'string', format: 'binary' } },
+        'image/gif': { schema: { type: 'string', format: 'binary' } },
+        'image/webp': { schema: { type: 'string', format: 'binary' } },
       },
     });
     for (const status of ['400', '404', '500']) {

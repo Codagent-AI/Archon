@@ -1,7 +1,7 @@
 import { type OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
 import type { Context } from 'hono';
 import { readFile, readdir, realpath, stat } from 'fs/promises';
-import { normalize, join } from 'path';
+import { extname, normalize, join } from 'path';
 import {
   getRunArtifactsDirForRoot,
   isRunArtifactsEngineEntry,
@@ -86,6 +86,10 @@ const getArtifactContentRoute = createRoute({
         'text/plain': { schema: z.string() },
         'text/markdown': { schema: z.string() },
         'text/html': { schema: z.string() },
+        'image/png': { schema: z.string().openapi({ format: 'binary' }) },
+        'image/jpeg': { schema: z.string().openapi({ format: 'binary' }) },
+        'image/gif': { schema: z.string().openapi({ format: 'binary' }) },
+        'image/webp': { schema: z.string().openapi({ format: 'binary' }) },
       },
     },
     400: jsonError('Invalid artifact path or filename'),
@@ -93,6 +97,15 @@ const getArtifactContentRoute = createRoute({
     500: jsonError('Server error'),
   },
 });
+
+// Raster images an HTML artifact can show. SVG is left out because it can carry script.
+const IMAGE_CONTENT_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+};
 
 type FileEntry = z.infer<typeof listArtifactsResponseSchema>['files'][number];
 async function readArtifactFileEntry(child: string, path: string): Promise<FileEntry | undefined> {
@@ -315,9 +328,9 @@ async function serveArtifactFile(
     return apiError(c, 404, 'Artifact file not found');
   }
 
-  let content: string;
+  let bytes: Buffer;
   try {
-    content = await readFile(realFilePath, 'utf-8');
+    bytes = await readFile(realFilePath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       return apiError(c, 404, 'Artifact file not found');
@@ -327,13 +340,23 @@ async function serveArtifactFile(
   }
 
   const lower = filename.toLowerCase();
+  const imageType = IMAGE_CONTENT_TYPES[extname(lower)];
+  if (imageType) {
+    return new Response(bytes, {
+      status: 200,
+      headers: { 'Content-Type': imageType, 'X-Content-Type-Options': 'nosniff' },
+    });
+  }
+
+  const content = bytes.toString('utf-8');
   if (lower.endsWith('.html') || lower.endsWith('.htm')) {
     // Agent-written page: sandbox it into an opaque origin (no allow-same-origin)
     // so it cannot read Archon's cookies or same-origin state. An opaque origin
     // can't be matched reliably by 'self', so name this server's origin
     // explicitly for connect-src/form-action. Its /api/* calls are cross-origin
     // (Origin: null) and rely on the CORS policy in api.ts. Links may open new
-    // tabs, which leave the sandbox, and the page may load Google Fonts.
+    // tabs, which leave the sandbox. The page may load Google Fonts, and images
+    // from this server, such as the run's other artifacts.
     const origin = new URL(c.req.url).origin;
     const csp = [
       'sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox',
@@ -341,7 +364,7 @@ async function serveArtifactFile(
       "script-src 'unsafe-inline'",
       "style-src 'unsafe-inline' https://fonts.googleapis.com",
       'font-src https://fonts.gstatic.com',
-      'img-src data:',
+      `img-src data: ${origin}`,
       `connect-src ${origin}`,
       `form-action ${origin}`,
     ].join('; ');

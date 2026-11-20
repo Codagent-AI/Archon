@@ -3793,6 +3793,10 @@ export interface paths {
             'text/plain': string;
             'text/markdown': string;
             'text/html': string;
+            'image/png': string;
+            'image/jpeg': string;
+            'image/gif': string;
+            'image/webp': string;
           };
         };
         /** @description Invalid artifact path or filename */
