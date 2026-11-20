@@ -224,13 +224,61 @@ describe('GET /api/runs/:runId/artifacts', () => {
     expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
     expect(response.headers.get('x-content-type-options')).toBe('nosniff');
     const csp = response.headers.get('content-security-policy') ?? '';
-    expect(csp).toContain('sandbox allow-scripts allow-forms allow-popups');
+    expect(csp).toContain('sandbox allow-scripts allow-popups');
     expect(csp).not.toContain('allow-same-origin');
+    expect(csp).not.toContain('allow-forms');
+    // No connect-src, so default-src 'none' keeps the page off Archon's API.
     expect(csp).toContain("default-src 'none'");
-    expect(csp).toContain('connect-src http://localhost:3090');
-    expect(csp).toContain('form-action http://localhost:3090');
-    expect(csp).toContain('img-src data: http://localhost:3090');
+    expect(csp).not.toContain('connect-src');
+    expect(csp).toContain("form-action 'none'");
+    expect(csp).toContain(`img-src data: http://localhost:3090/api/artifacts/${runId}/`);
     expect(await response.text()).toBe('<p>hi</p>');
+  });
+
+  async function requestPage(base: string, headers: Record<string, string>): Promise<Response> {
+    const runId = 'run-serve-page';
+    const dir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs', runId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'page.html'), '<p>hi</p>');
+    mockGetWorkflowRun.mockImplementationOnce(async () => ({
+      ...MOCK_RUNNING_RUN,
+      id: runId,
+      codebase_id: 'cb-local',
+    }));
+    mockGetCodebase.mockImplementationOnce(async () => ({
+      name: 'workspace',
+      kind: 'repo',
+      default_cwd: '/home/u/workspace',
+    }));
+    const { app } = makeApp();
+    return app.request(`${base}/api/artifacts/${runId}/page.html`, { headers });
+  }
+
+  test.each([
+    ['the request', 'http://127.0.0.1:4000', {}, 'http://127.0.0.1:4000'],
+    [
+      'the Vite dev proxy',
+      'http://localhost:3090',
+      { 'X-Forwarded-Host': 'localhost:5173', 'X-Forwarded-Proto': 'http' },
+      'http://localhost:5173',
+    ],
+    [
+      'an HTTPS proxy chain',
+      'http://10.0.0.5:3090',
+      { 'X-Forwarded-Host': 'archon.example, 10.0.0.2', 'X-Forwarded-Proto': 'https, http' },
+      'https://archon.example',
+    ],
+  ])('takes the page origin from %s', async (_source, base, headers, origin) => {
+    const response = await requestPage(base, headers);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-security-policy')).toContain(
+      `img-src data: ${origin}/api/artifacts/run-serve-page/`
+    );
+  });
+
+  test('refuses an HTML page whose host cannot go in a policy', async () => {
+    const response = await requestPage('http://localhost:3090', { 'X-Forwarded-Host': 'a;b' });
+    expect(response.status).toBe(400);
   });
 
   test.each([
@@ -264,11 +312,15 @@ describe('GET /api/runs/:runId/artifacts', () => {
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
   });
 
-  test('markdown and text artifacts carry no CSP', async () => {
+  test.each([
+    ['a.md', 'text/markdown; charset=utf-8'],
+    // SVG can carry script, so it stays text.
+    ['logo.svg', 'text/plain; charset=utf-8'],
+  ])('serves %s as %s with no CSP', async (name, type) => {
     const runId = 'run-serve-nocsp';
     const dir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs', runId);
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, 'a.md'), '# a');
+    await writeFile(join(dir, name), '<svg><script>alert(1)</script></svg>');
     mockGetWorkflowRun.mockImplementation(async () => ({
       ...MOCK_RUNNING_RUN,
       id: runId,
@@ -280,8 +332,8 @@ describe('GET /api/runs/:runId/artifacts', () => {
       default_cwd: '/home/u/workspace',
     }));
     const { app } = makeApp();
-    const response = await app.request(`/api/artifacts/${runId}/a.md`);
-    expect(response.headers.get('content-type')).toBe('text/markdown; charset=utf-8');
+    const response = await app.request(`/api/artifacts/${runId}/${name}`);
+    expect(response.headers.get('content-type')).toBe(type);
     expect(response.headers.get('content-security-policy')).toBeNull();
   });
 
