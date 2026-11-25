@@ -360,16 +360,7 @@ async function serveArtifactFile(
 
   const content = bytes.toString('utf-8');
   if (lower.endsWith('.html') || lower.endsWith('.htm')) {
-    const answersWait = namesPage(run, filename);
-    if (answersWait && (process.env.WEB_UI_ORIGIN || isApiGateEnabled())) {
-      // The page has an opaque origin and no credential, so a restricted CORS origin or
-      // the API access gate refuses its calls. Answer from the CLI or Web UI instead.
-      getLog().warn(
-        { runId, filename, webUiOrigin: Boolean(process.env.WEB_UI_ORIGIN) },
-        'artifacts.answer_page_blocked_by_api_settings'
-      );
-    }
-    return htmlPage(c, runId, content, answersWait);
+    return htmlPage(c, runId, content, answersWait(run, runId, filename));
   }
 
   const contentType = filename.endsWith('.md')
@@ -379,6 +370,24 @@ async function serveArtifactFile(
     status: 200,
     headers: { 'Content-Type': contentType },
   });
+}
+
+/** Whether this page may answer the run's wait, warning when the API settings will refuse it. */
+function answersWait(
+  run: Pick<WorkflowRun, 'status' | 'metadata'>,
+  runId: string,
+  filename: string
+): boolean {
+  const named = namesPage(run, filename);
+  if (named && (process.env.WEB_UI_ORIGIN || isApiGateEnabled())) {
+    // The page has an opaque origin and no credential, so a restricted CORS origin or
+    // the API access gate refuses its calls. Answer from the CLI or Web UI instead.
+    getLog().warn(
+      { runId, filename, webUiOrigin: Boolean(process.env.WEB_UI_ORIGIN) },
+      'artifacts.answer_page_blocked_by_api_settings'
+    );
+  }
+  return named;
 }
 
 /**
