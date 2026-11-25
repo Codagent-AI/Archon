@@ -41,7 +41,7 @@ import { runUsageMismatch, type RunUsageFigures } from './dag/usage';
 import { RunSourceUnreadableError } from './dag/node-source';
 import { type RunInputs, type RunLayersContext } from './dag/run-context';
 import { assertRunCapabilities } from './dag/capability-preflight';
-import { runLayers } from './dag/run-layers';
+import { recordOperatorReruns, runLayers } from './dag/run-layers';
 import { publishContainerPause, type ContainerPauseReceipt } from './dag/pause';
 import { restoreRunState, type RestoredRunState } from './dag/resume-state';
 import { failRun, finishRun, skipIfStatusChanged } from './dag/run-terminal';
@@ -294,6 +294,8 @@ export async function executeDagWorkflow(
     );
   };
 
+  // Before the budget check, so a refused start still keeps the operator's --rerun request.
+  await recordOperatorReruns(runCtx);
   const startRefusal = runBudget && runBudgetStartRefusal(runBudget);
   if (runBudget !== undefined && startRefusal !== undefined) {
     await failRunForBudget(runBudget, startRefusal);

@@ -18,7 +18,11 @@ async function assertRerunTargets(
   const discoveryCwd = run.codebase_id
     ? await resolveDiscoveryCwdForCodebase(host, run.id, run.codebase_id, 'resume')
     : run.working_path;
-  if (!discoveryCwd) return;
+  if (!discoveryCwd) {
+    throw new Error(
+      `Cannot check --rerun: workflow run '${run.id}' records no codebase or working path to load its workflow from.`
+    );
+  }
   const resolved = await resolveRunWorkflow(host.deps, run, discoveryCwd, CLI_WORKFLOW_SURFACE);
   if (!resolved.ok) throw new Error(`Cannot check --rerun: ${resolved.message}`);
   assertRerunNodeIds(resolved.workflow, rerun);

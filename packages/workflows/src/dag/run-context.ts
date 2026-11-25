@@ -254,6 +254,8 @@ export interface RunLayersContext extends RunInputs, RunDerived {
    * usual stale-dependency rule against the node's prior snapshot.
    */
   rerunNodeIds?: ReadonlySet<string>;
+  /** Dependents of a `--rerun` node whose invalidation this pass already recorded. */
+  rerunInvalidated?: Set<string>;
   /**
    * Failures a run continued after a pause had already moved past (top-level only):
    * those nodes replay their failure instead of running again. Undefined on a retry.

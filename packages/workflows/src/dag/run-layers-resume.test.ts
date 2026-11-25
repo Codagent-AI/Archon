@@ -1061,8 +1061,13 @@ describe('executeDagWorkflow -- prior-success cache invalidated by dep re-execut
     expect(consumerSkippedEvent).toBeDefined();
   });
 
-  async function resumeWithRerun(producerOutput: string, rerunNodeIds: string[]) {
+  async function resumeWithRerun(
+    producerOutput: string,
+    rerunNodeIds: string[],
+    pauseAfterProducer = false
+  ) {
     let queryCount = 0;
+    const store = createMockStore();
     mockSendQueryDag.mockImplementation(async function* () {
       queryCount++;
       yield {
@@ -1070,8 +1075,12 @@ describe('executeDagWorkflow -- prior-success cache invalidated by dep re-execut
         text: queryCount === 1 ? producerOutput : 'fresh consumer',
       };
       yield { type: 'result', sessionId: 'session-id' };
+      if (pauseAfterProducer && queryCount === 1) {
+        (store.getWorkflowRunStatus as ReturnType<typeof mock>).mockImplementation(
+          async () => 'paused'
+        );
+      }
     });
-    const store = createMockStore();
     await executeDagWorkflow(
       dagOptions({
         deps: createMockDeps(store),
@@ -1131,6 +1140,24 @@ describe('executeDagWorkflow -- prior-success cache invalidated by dep re-execut
     expect(eventFor('node_skipped_prior_success', 'consumer')).toBeDefined();
     expect(eventFor('node_prior_cache_invalidated', 'consumer')).toBeUndefined();
   });
+
+  it.each([
+    ['records', 'changed', 'unblocked answer', ['producer']],
+    ['does not record', 'unchanged', 'blocked answer', undefined],
+  ] as const)(
+    '%s a dependent invalidation before a pause when the --rerun output is %s',
+    async (_verb, _change, producerOutput, expectedDeps) => {
+      const { queryCount, eventFor } = await resumeWithRerun(producerOutput, ['producer'], true);
+
+      // The run pauses after the producer, so the consumer is never admitted this pass: only
+      // the recorded row keeps the next pass from replaying a result computed from the old output.
+      expect(queryCount()).toBe(1);
+      expect(eventFor('node_started', 'consumer')).toBeUndefined();
+      expect(eventFor('node_prior_cache_invalidated', 'consumer')?.data.invalidating_deps).toEqual(
+        expectedDeps
+      );
+    }
+  );
 
   it('replays every node when none is named for --rerun', async () => {
     const { queryCount, eventFor } = await resumeWithRerun('unused', []);

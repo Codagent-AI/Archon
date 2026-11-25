@@ -284,6 +284,27 @@ describe('write command --json output', () => {
     });
   });
 
+  it('resume --json refuses --rerun when the run records nowhere to load its workflow from', async () => {
+    const workflowDb = await import('@archon/core/db/workflows');
+    (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
+      id: 'run-nowhere',
+      workflow_name: 'implement',
+      status: 'failed',
+    });
+
+    const exitCode = await workflowResumeCommand(
+      createTestWorkflowHost(),
+      'run-nowhere',
+      true,
+      undefined,
+      false,
+      ['open-draft-pr']
+    );
+
+    expect(exitCode).toBe(1);
+    expect(JSON.parse(firstJsonPayload(stdoutSpy))).toMatchObject({ ok: false, action: 'resume' });
+  });
+
   it('resume --json exits nonzero with {ok:false} on a not-found run', async () => {
     const workflowDb = await import('@archon/core/db/workflows');
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce(null);
