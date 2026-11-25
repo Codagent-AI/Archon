@@ -64,6 +64,7 @@ export type TemplateSlotName =
   | 'wait.options'
   | 'wait.recommendation'
   | 'wait.labels.*'
+  | 'wait.pages.*'
   | 'workflow.input'
   | 'workflow.with.*'
   | 'workflow.fan_out.items'
@@ -113,6 +114,7 @@ export const SLOT_SPEC = {
   'wait.options': { surface: 'value', outputReference: true },
   'wait.recommendation': { surface: 'value', outputReference: true },
   'wait.labels.*': { surface: 'value', outputReference: true },
+  'wait.pages.*': { surface: 'value', outputReference: true },
   'workflow.input': { surface: 'value', outputReference: true },
   'workflow.with.*': { surface: 'value', outputReference: true, valuePosition: 'workflow_with' },
   'workflow.fan_out.items': { surface: 'value', outputReference: true },
@@ -376,6 +378,13 @@ function walkWait(node: WaitNode, emit: SlotEmitter): void {
       if (wait.attention !== undefined)
         node.wait = { ...wait, labels: { ...wait.labels, [key]: value } };
     });
+  (node.wait.pages ?? []).forEach((page, index) =>
+    emit.slot('wait.pages.*', `wait.pages.${String(index)}`, page, value => {
+      const wait = node.wait;
+      if (wait.attention !== undefined && wait.pages !== undefined)
+        node.wait = { ...wait, pages: wait.pages.map((p, i) => (i === index ? value : p)) };
+    })
+  );
 }
 
 function walkComposition(node: WorkflowNode | ComposeFanOutNode, emit: SlotEmitter): void {

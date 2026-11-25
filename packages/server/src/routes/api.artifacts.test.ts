@@ -235,6 +235,153 @@ describe('GET /api/runs/:runId/artifacts', () => {
     expect(await response.text()).toBe('<p>hi</p>');
   });
 
+  describe("an HTML page named by the run's attention wait", () => {
+    const runId = 'run-answer-page';
+    const connectSrc =
+      `connect-src http://localhost:3090/api/runs/${runId}/attention ` +
+      `http://localhost:3090/api/workflows/runs/${runId}/answer`;
+    const waitingRun = (
+      wait: Record<string, unknown> | undefined,
+      status: 'paused' | 'running' | 'cancelled' | 'completed' = 'paused'
+    ) => ({
+      ...MOCK_RUNNING_RUN,
+      id: runId,
+      codebase_id: 'cb-local',
+      status,
+      metadata: (wait === undefined ? {} : { wait }) as Record<string, unknown>,
+    });
+    const attention = (extra: Record<string, unknown> = {}) => ({
+      owner: 'node',
+      nodeId: 'ask',
+      kind: 'attention',
+      waitingSince: '2026-11-24T10:00:00.000Z',
+      message: 'Review',
+      pauseId: 'p-1',
+      pages: ['review/page.html'],
+      ...extra,
+    });
+    const answered = { answer: { text: 'ok' }, answeredVia: 'api' };
+
+    async function csp(
+      run: ReturnType<typeof waitingRun>,
+      path: string,
+      id = runId
+    ): Promise<string> {
+      const dir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs', id);
+      await mkdir(join(dir, 'review'), { recursive: true });
+      await writeFile(join(dir, 'review', 'page.html'), '<p>q</p>');
+      await writeFile(join(dir, 'other.html'), '<p>o</p>');
+      mockGetWorkflowRun.mockImplementationOnce(async () => ({ ...run, id }));
+      mockGetCodebase.mockImplementationOnce(async () => ({
+        name: 'workspace',
+        kind: 'repo',
+        default_cwd: '/home/u/workspace',
+      }));
+      const { app } = makeApp();
+      const response = await app.request(`http://localhost:3090/api/artifacts/${id}/${path}`);
+      expect(response.status).toBe(200);
+      return response.headers.get('content-security-policy') ?? '';
+    }
+
+    test('adds exactly the two addresses to the named page and leaves the rest of the policy', async () => {
+      const named = await csp(waitingRun(attention()), 'review/page.html');
+      const ordinary = await csp(waitingRun(undefined, 'running'), 'review/page.html');
+      expect(named).toBe(`${ordinary}; ${connectSrc}`);
+    });
+
+    test.each([
+      ['an unnamed page of the same run', waitingRun(attention()), 'other.html'],
+      ['the named page once answered', waitingRun(attention(answered)), 'review/page.html'],
+      ['the named page after the wait is gone', waitingRun(undefined), 'review/page.html'],
+      [
+        'the named page at a later wait that does not name it',
+        waitingRun(attention({ pages: ['other.html'], pauseId: 'p-2' })),
+        'review/page.html',
+      ],
+      ['the named page of a running run', waitingRun(attention(), 'running'), 'review/page.html'],
+      [
+        'the named page of a cancelled run',
+        waitingRun(attention(), 'cancelled'),
+        'review/page.html',
+      ],
+      [
+        'the named page of a finished run',
+        waitingRun(attention(), 'completed'),
+        'review/page.html',
+      ],
+      [
+        'a time wait',
+        waitingRun({
+          owner: 'node',
+          nodeId: 'w',
+          kind: 'time',
+          waitingSince: '2026-11-24T10:00:00.000Z',
+          resumeAt: '2026-11-25T10:00:00.000Z',
+        }),
+        'review/page.html',
+      ],
+    ])('gives %s no connect-src', async (_name, run, path) => {
+      expect(await csp(run, path)).not.toContain('connect-src');
+    });
+
+    test('a page of another run gets none', async () => {
+      // The page is named by run-answer-page's wait; this run has no wait.
+      const other = await csp(waitingRun(undefined, 'running'), 'review/page.html', 'run-other');
+      expect(other).not.toContain('connect-src');
+    });
+
+    test.each([
+      ['./review/page.html'],
+      ['review//page.html'],
+      ['review/./page.html'],
+      ['review%2Fpage.html'],
+      ['%72eview/page.html'],
+    ])('matches the named page when requested as %s', async path => {
+      expect(await csp(waitingRun(attention()), path)).toContain(connectSrc);
+    });
+
+    test('encodes a run id in the addresses', async () => {
+      const id = 'run with space';
+      const policy = await csp(waitingRun(attention()), 'review/page.html', id);
+      expect(policy).toContain(
+        'connect-src http://localhost:3090/api/runs/run%20with%20space/attention ' +
+          'http://localhost:3090/api/workflows/runs/run%20with%20space/answer'
+      );
+    });
+
+    // A sandboxed page has an opaque origin: its requests carry `Origin: null`, and its
+    // JSON POST is preflighted.
+    test.each([
+      [`/api/runs/${runId}/attention`, 'GET'],
+      [`/api/workflows/runs/${runId}/answer`, 'POST'],
+    ])('answers the preflight for %s from an opaque origin', async (path, method) => {
+      const { app } = makeApp();
+      const response = await app.request(`http://localhost:3090${path}`, {
+        method: 'OPTIONS',
+        headers: {
+          Origin: 'null',
+          'Access-Control-Request-Method': method,
+          'Access-Control-Request-Headers': 'content-type',
+        },
+      });
+      expect(response.status).toBe(204);
+      expect(response.headers.get('access-control-allow-origin')).toBe('*');
+      expect(response.headers.get('access-control-allow-methods')).toContain(method);
+      expect(response.headers.get('access-control-allow-headers')?.toLowerCase()).toContain(
+        'content-type'
+      );
+    });
+
+    test('lets an opaque-origin page read the attention response', async () => {
+      mockGetWorkflowRun.mockImplementationOnce(async () => null);
+      const { app } = makeApp();
+      const response = await app.request(`http://localhost:3090/api/runs/${runId}/attention`, {
+        headers: { Origin: 'null' },
+      });
+      expect(response.headers.get('access-control-allow-origin')).toBe('*');
+    });
+  });
+
   async function requestPage(base: string, headers: Record<string, string>): Promise<Response> {
     const runId = 'run-serve-page';
     const dir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs', runId);

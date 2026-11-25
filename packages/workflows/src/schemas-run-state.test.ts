@@ -136,6 +136,7 @@ describe('persisted workflow continuation schemas', () => {
       answeredVia: 'cli',
       answeredAt: timeWait.waitingSince,
       labels: { ci: 'pr' },
+      pages: ['review/page.html'],
       revision: 3,
       reaskedFrom: 'ask-1',
     } satisfies WorkflowWaitContext;

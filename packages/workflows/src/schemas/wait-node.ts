@@ -214,6 +214,44 @@ const waitUntilValueSchema = z
     "'wait.until' must be an ISO-8601 timestamp or contain a runtime reference"
   );
 
+/**
+ * Why `page` cannot name an HTML page in a run's artifacts folder, or `undefined` when it
+ * can. The server compares the stored, normalized path with the file it serves, so both
+ * sides use `normalizeAttentionPage`.
+ */
+export function attentionPageProblem(page: string): string | undefined {
+  if (page.trim() === '') return 'must not be empty';
+  if (page.includes('\\') || page.includes('\0'))
+    return "must use '/' separators and no control characters";
+  if (page.startsWith('/') || /^[A-Za-z]:/.test(page))
+    return 'must be relative to the artifacts folder';
+  if (page.split('/').includes('..')) return "must not contain '..'";
+  const normalized = normalizeAttentionPage(page);
+  if (normalized === '' || page.endsWith('/')) return 'must name a file';
+  if (!/\.html?$/i.test(normalized)) return "must be an '.html' or '.htm' file";
+  return undefined;
+}
+
+/** The canonical form of a valid page path (`./a//b.html` becomes `a/b.html`). */
+export function normalizeAttentionPage(page: string): string {
+  return page
+    .split('/')
+    .filter(segment => segment !== '' && segment !== '.')
+    .join('/');
+}
+
+/** A `pages` entry that is not a literal path (it holds a reference) is checked when the wait pauses. */
+const attentionPagesSchema = z
+  .array(z.string().trim().min(1, 'must not be empty'))
+  .min(1, "'wait.pages' must list at least one page")
+  .superRefine((pages, ctx) => {
+    pages.forEach((page, index) => {
+      if (page.includes('$')) return;
+      const problem = attentionPageProblem(page);
+      if (problem !== undefined) ctx.addIssue({ code: 'custom', path: [index], message: problem });
+    });
+  });
+
 const waitConfigVariantSchemas = [
   z.strictObject({
     duration_ms: z.number().int().positive().max(MAX_DURABLE_WAIT_MS),
@@ -253,6 +291,8 @@ const waitConfigVariantSchemas = [
       labels: attentionLabelsSchema.optional(),
       /** `select` only: also offer `OTHER_ATTENTION_OPTION`, answered with text. */
       other: z.boolean().optional(),
+      /** HTML pages in the run's artifacts folder that may answer this wait. */
+      pages: attentionPagesSchema.optional(),
     })
     .superRefine((value, ctx) => {
       const form = value.form ?? 'message';
@@ -304,6 +344,8 @@ export type WaitCondition =
       labels?: AttentionLabels;
       /** The wait also offers `OTHER_ATTENTION_OPTION`. */
       other?: true;
+      /** Page paths, which may hold runtime references resolved when the wait pauses. */
+      pages?: string[];
     };
 
 export function waitCondition(config: WaitConfig): WaitCondition {
@@ -324,6 +366,7 @@ export function waitCondition(config: WaitConfig): WaitCondition {
     ...(config.recommendation !== undefined ? { recommendation: config.recommendation } : {}),
     ...(config.labels !== undefined ? { labels: config.labels } : {}),
     ...(config.other === true ? { other: true } : {}),
+    ...(config.pages !== undefined ? { pages: config.pages } : {}),
   };
 }
 

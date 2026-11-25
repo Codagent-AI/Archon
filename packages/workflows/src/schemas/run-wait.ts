@@ -102,6 +102,8 @@ const workflowWaitAttentionFields = {
   answeredBy: attentionAnswererSchema.optional(),
   answeredAt: z.string().datetime().optional(),
   labels: attentionLabelsSchema.optional(),
+  /** Resolved, normalized artifact paths of the HTML pages that may answer this wait. */
+  pages: z.array(z.string().min(1)).min(1).optional(),
   revision: z.number().int().positive().optional(),
   loopQuestionReferences: z.record(z.string(), z.string()).optional(),
   reaskedFrom: z.string().min(1).optional(), // occurrence whose answer was discarded as stale

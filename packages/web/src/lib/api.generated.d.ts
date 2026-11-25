@@ -5781,6 +5781,7 @@ export interface components {
               [key: string]: string;
             };
             other?: boolean;
+            pages?: string[];
           };
       cancel?: string;
       script?: string;
@@ -6634,6 +6635,7 @@ export interface components {
           labels?: {
             [key: string]: string;
           };
+          pages?: string[];
           revision?: number;
           loopQuestionReferences?: {
             [key: string]: string;
@@ -6857,6 +6859,7 @@ export interface components {
           labels?: {
             [key: string]: string;
           };
+          pages?: string[];
           revision?: number;
           loopQuestionReferences?: {
             [key: string]: string;
