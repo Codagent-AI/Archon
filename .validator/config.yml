@@ -1,0 +1,30 @@
+# Agent Validator for the Codagent fork of Archon. Reviews use the CLI and model
+# from your global agent-validator config.
+#
+# Changes are diffed against base_branch, the fork's integration branch.
+base_branch: origin/dev
+
+# entry_points configured by /validator-setup
+entry_points:
+  # The whole repository. Type-check and lint cover every package and the
+  # repo scripts, so they run once for any change.
+  - path: .
+    exclude:
+      - .validator
+    checks:
+      - type-check:
+          command: bun run type-check
+          timeout: 900
+      - lint:
+          command: bun run lint
+          timeout: 600
+    reviews:
+      - all-reviewers:
+          builtin: all-reviewers
+
+  # Each changed package runs its own test suite.
+  - path: packages/*
+    checks:
+      - test:
+          command: bun run test
+          timeout: 900
