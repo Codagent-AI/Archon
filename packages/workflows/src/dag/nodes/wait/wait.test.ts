@@ -1171,6 +1171,95 @@ describe('executeDagWorkflow -- durable wait node', () => {
     );
   });
 
+  it('stores the pages resolved and normalized when the wait pauses', async () => {
+    const store = createMockStore();
+    await executeDagWorkflow(
+      dagOptions({
+        deps: createMockDeps(store),
+        platform: createMockPlatform(),
+        conversationId: 'conv-attention-pages',
+        cwd: testDir,
+        workflow: {
+          name: 'attention-pages-test',
+          nodes: [
+            {
+              id: 'plan',
+              kind: 'exec',
+              runtime: 'sh',
+              script: `printf '%s' '{"page":"./review//page.html"}'`,
+              output_format: {
+                type: 'object',
+                properties: { page: { type: 'string' } },
+                required: ['page'],
+              },
+            },
+            {
+              id: 'ask',
+              kind: 'wait',
+              depends_on: ['plan'],
+              wait: {
+                attention: 'Review it',
+                pages: ['$plan.output.page', 'review/page.html', 'b.htm'],
+              },
+            },
+          ],
+        },
+        workflowRun: makeWorkflowRun('attention-pages'),
+      })
+    );
+
+    expect(store.pauseWorkflowRunForWait).toHaveBeenCalledWith(
+      'attention-pages',
+      expect.objectContaining({ kind: 'attention', pages: ['review/page.html', 'b.htm'] }),
+      { kind: 'started', stepName: 'ask' }
+    );
+  });
+
+  it('fails the wait when a referenced page is not a relative HTML path', async () => {
+    for (const [name, value] of [
+      ['absolute', '/etc/page.html'],
+      ['parent segment', '../page.html'],
+      ['not html', 'page.txt'],
+      ['empty', ' '],
+    ] as const) {
+      const store = createMockStore();
+      await executeDagWorkflow(
+        dagOptions({
+          deps: createMockDeps(store),
+          platform: createMockPlatform(),
+          conversationId: 'conv-attention-bad-pages',
+          cwd: testDir,
+          workflow: {
+            name: 'attention-bad-pages-test',
+            nodes: [
+              {
+                id: 'plan',
+                kind: 'exec',
+                runtime: 'sh',
+                script: `printf '%s' '{"page":"${value}"}'`,
+              },
+              {
+                id: 'ask',
+                kind: 'wait',
+                depends_on: ['plan'],
+                wait: { attention: 'Review it', pages: ['$plan.output.page'] },
+              },
+            ],
+          },
+          workflowRun: makeWorkflowRun(`attention-bad-pages-${name.replace(/ /g, '-')}`),
+        })
+      );
+      expect(store.pauseWorkflowRunForWait).not.toHaveBeenCalled();
+      const failed = store.createWorkflowEvent.mock.calls
+        .map(call => call[0])
+        .find(event => event.event_type === 'node_failed' && event.step_name === 'ask');
+      expect({ name, error: String(failed?.data?.error) }).toMatchObject({
+        name,
+        error: expect.stringContaining("Wait node 'ask' resolved a 'pages' entry"),
+      });
+    }
+  });
+
   it('fails the wait, naming the producer, when referenced options are invalid', async () => {
     for (const [name, value] of [
       ['empty', '[]'],

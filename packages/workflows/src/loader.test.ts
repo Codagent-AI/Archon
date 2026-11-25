@@ -2437,3 +2437,43 @@ nodes:
     );
   });
 });
+
+describe('attention wait pages', () => {
+  const parsePages = (pages: string, dependsOn = '[plan]') =>
+    parseWorkflow(
+      `name: paged
+description: Pages that may answer an attention wait
+nodes:
+  - id: plan
+    bash: echo '{}'
+  - id: other
+    bash: echo '{}'
+  - id: ask
+    depends_on: ${dependsOn}
+    wait:
+      attention: Review the page
+      pages: ${pages}
+`,
+      'paged.yaml'
+    );
+
+  it('loads literal pages and pages that reference an upstream output', () => {
+    expect(parsePages('["review/page.html", "$plan.output.page"]').error).toBeNull();
+  });
+
+  it.each([
+    ['an empty list', '[]'],
+    ['an absolute path', '["/page.html"]'],
+    ['a parent segment', '["a/../../page.html"]'],
+    ['a non-HTML name', '["page.md"]'],
+    ['a backslash path', '["a\\\\page.html"]'],
+  ])('rejects %s', (_name, pages) => {
+    expect(parsePages(pages).error).not.toBeNull();
+  });
+
+  it('rejects a page that references a node the wait does not depend on', () => {
+    expect(parsePages('["$other.output.page"]').error?.error).toContain(
+      "field 'wait.pages.0' references '$other.output', which is not an upstream dependency"
+    );
+  });
+});

@@ -8,6 +8,7 @@ import {
   makeApp,
 } from '../test/api-workflow-runs-harness';
 import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
+import { getLog } from './api-route-kit';
 import { removeTempTree } from '@archon/paths/test-utils';
 import { mkdir, mkdtemp, symlink, writeFile, realpath, utimes } from 'fs/promises';
 import * as fsPromises from 'fs/promises';
@@ -233,6 +234,175 @@ describe('GET /api/runs/:runId/artifacts', () => {
     expect(csp).toContain("form-action 'none'");
     expect(csp).toContain(`img-src data: http://localhost:3090/api/artifacts/${runId}/`);
     expect(await response.text()).toBe('<p>hi</p>');
+  });
+
+  describe("an HTML page named by the run's attention wait", () => {
+    const runId = 'run-answer-page';
+    const connectSrc =
+      `connect-src http://localhost:3090/api/runs/${runId}/attention ` +
+      `http://localhost:3090/api/workflows/runs/${runId}/answer`;
+    const waitingRun = (
+      wait: Record<string, unknown> | undefined,
+      status: 'paused' | 'running' | 'cancelled' | 'completed' = 'paused'
+    ) => ({
+      ...MOCK_RUNNING_RUN,
+      id: runId,
+      codebase_id: 'cb-local',
+      status,
+      metadata: (wait === undefined ? {} : { wait }) as Record<string, unknown>,
+    });
+    const attention = (extra: Record<string, unknown> = {}) => ({
+      owner: 'node',
+      nodeId: 'ask',
+      kind: 'attention',
+      waitingSince: '2026-11-24T10:00:00.000Z',
+      message: 'Review',
+      pauseId: 'p-1',
+      pages: ['review/page.html'],
+      ...extra,
+    });
+    const answered = { answer: { text: 'ok' }, answeredVia: 'api' };
+
+    async function csp(
+      run: ReturnType<typeof waitingRun>,
+      path: string,
+      id = runId
+    ): Promise<string> {
+      const dir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs', id);
+      await mkdir(join(dir, 'review'), { recursive: true });
+      await writeFile(join(dir, 'review', 'page.html'), '<p>q</p>');
+      await writeFile(join(dir, 'other.html'), '<p>o</p>');
+      mockGetWorkflowRun.mockImplementationOnce(async () => ({ ...run, id }));
+      mockGetCodebase.mockImplementationOnce(async () => ({
+        name: 'workspace',
+        kind: 'repo',
+        default_cwd: '/home/u/workspace',
+      }));
+      const { app } = makeApp();
+      const response = await app.request(`http://localhost:3090/api/artifacts/${id}/${path}`);
+      expect(response.status).toBe(200);
+      return response.headers.get('content-security-policy') ?? '';
+    }
+
+    test('adds exactly the two addresses to the named page and leaves the rest of the policy', async () => {
+      const named = await csp(waitingRun(attention()), 'review/page.html');
+      const ordinary = await csp(waitingRun(undefined, 'running'), 'review/page.html');
+      expect(named).toBe(`${ordinary}; ${connectSrc}`);
+    });
+
+    test.each([
+      ['an unnamed page of the same run', waitingRun(attention()), 'other.html'],
+      ['the named page once answered', waitingRun(attention(answered)), 'review/page.html'],
+      ['the named page after the wait is gone', waitingRun(undefined), 'review/page.html'],
+      [
+        'the named page at a later wait that does not name it',
+        waitingRun(attention({ pages: ['other.html'], pauseId: 'p-2' })),
+        'review/page.html',
+      ],
+      ['the named page of a running run', waitingRun(attention(), 'running'), 'review/page.html'],
+      [
+        'the named page of a cancelled run',
+        waitingRun(attention(), 'cancelled'),
+        'review/page.html',
+      ],
+      [
+        'the named page of a finished run',
+        waitingRun(attention(), 'completed'),
+        'review/page.html',
+      ],
+      [
+        'a time wait',
+        waitingRun({
+          owner: 'node',
+          nodeId: 'w',
+          kind: 'time',
+          waitingSince: '2026-11-24T10:00:00.000Z',
+          resumeAt: '2026-11-25T10:00:00.000Z',
+        }),
+        'review/page.html',
+      ],
+    ])('gives %s no connect-src', async (_name, run, path) => {
+      expect(await csp(run, path)).not.toContain('connect-src');
+    });
+
+    test('a page of another run gets none', async () => {
+      // The page is named by run-answer-page's wait; this run has no wait.
+      const other = await csp(waitingRun(undefined, 'running'), 'review/page.html', 'run-other');
+      expect(other).not.toContain('connect-src');
+    });
+
+    test.each([
+      ['./review/page.html'],
+      ['review//page.html'],
+      ['review/./page.html'],
+      ['review%2Fpage.html'],
+      ['%72eview/page.html'],
+    ])('matches the named page when requested as %s', async path => {
+      expect(await csp(waitingRun(attention()), path)).toContain(connectSrc);
+    });
+
+    test('encodes a run id in the addresses', async () => {
+      const id = 'run with space';
+      const policy = await csp(waitingRun(attention()), 'review/page.html', id);
+      expect(policy).toContain(
+        'connect-src http://localhost:3090/api/runs/run%20with%20space/attention ' +
+          'http://localhost:3090/api/workflows/runs/run%20with%20space/answer'
+      );
+    });
+
+    test('warns when a restricted CORS origin will refuse the named page', async () => {
+      const warning = 'artifacts.answer_page_blocked_by_api_settings';
+      const warn = spyOn(getLog(), 'warn');
+      const original = process.env.WEB_UI_ORIGIN;
+      try {
+        delete process.env.WEB_UI_ORIGIN;
+        await csp(waitingRun(attention()), 'review/page.html');
+        process.env.WEB_UI_ORIGIN = 'http://ui.example';
+        await csp(waitingRun(attention()), 'other.html');
+        expect(warn).not.toHaveBeenCalledWith(expect.anything(), warning);
+        await csp(waitingRun(attention()), 'review/page.html');
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({ runId, filename: 'review/page.html' }),
+          warning
+        );
+      } finally {
+        if (original === undefined) delete process.env.WEB_UI_ORIGIN;
+        else process.env.WEB_UI_ORIGIN = original;
+        warn.mockRestore();
+      }
+    });
+
+    // A sandboxed page has an opaque origin: its requests carry `Origin: null`, and its
+    // JSON POST is preflighted.
+    test.each([
+      [`/api/runs/${runId}/attention`, 'GET'],
+      [`/api/workflows/runs/${runId}/answer`, 'POST'],
+    ])('answers the preflight for %s from an opaque origin', async (path, method) => {
+      const { app } = makeApp();
+      const response = await app.request(`http://localhost:3090${path}`, {
+        method: 'OPTIONS',
+        headers: {
+          Origin: 'null',
+          'Access-Control-Request-Method': method,
+          'Access-Control-Request-Headers': 'content-type',
+        },
+      });
+      expect(response.status).toBe(204);
+      expect(response.headers.get('access-control-allow-origin')).toBe('*');
+      expect(response.headers.get('access-control-allow-methods')).toContain(method);
+      expect(response.headers.get('access-control-allow-headers')?.toLowerCase()).toContain(
+        'content-type'
+      );
+    });
+
+    test('lets an opaque-origin page read the attention response', async () => {
+      mockGetWorkflowRun.mockImplementationOnce(async () => null);
+      const { app } = makeApp();
+      const response = await app.request(`http://localhost:3090/api/runs/${runId}/attention`, {
+        headers: { Origin: 'null' },
+      });
+      expect(response.headers.get('access-control-allow-origin')).toBe('*');
+    });
   });
 
   async function requestPage(base: string, headers: Record<string, string>): Promise<Response> {
@@ -662,11 +832,10 @@ describe('GET /api/artifacts/:runId/* storage-key resolution', () => {
     expect(body.error).toBe('Artifact file not found');
   });
 
-  test('a backslash climb out of the artifacts directory is refused on Windows', async () => {
+  test('a backslash climb out of the artifacts directory is refused', async () => {
     // The route's `..` segment check splits on `/` only. On Windows `\` is a
-    // separator too, so only the containment check stops `..\` from leaving the
-    // run's directory for a sibling run whose name shares this one's prefix.
-    // On POSIX `\` is an ordinary filename character and the name stays inside.
+    // separator too, so `..\` could leave the run's directory for a sibling run
+    // whose name shares this one's prefix. The route refuses any `\`.
     const runId = 'run-serve-backslash';
     const runsDir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs');
     await mkdir(join(runsDir, runId), { recursive: true });
@@ -686,12 +855,8 @@ describe('GET /api/artifacts/:runId/* storage-key resolution', () => {
     const escape = encodeURIComponent(`..\\${runId}-old\\plan.md`);
     const response = await app.request(`/api/artifacts/${runId}/${escape}`);
 
-    if (process.platform === 'win32') {
-      expect(response.status).toBe(400);
-      expect(await response.json()).toEqual({ error: 'Invalid filename' });
-    } else {
-      expect(response.status).toBe(404);
-    }
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'Invalid filename' });
   });
 
   test('an artifact pointer from a run result addresses this route with no extra machinery', async () => {

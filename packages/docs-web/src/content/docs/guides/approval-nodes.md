@@ -90,6 +90,8 @@ reference to an upstream output:
 ```
 
 The attention message accepts runtime references (`$plan.output`, `$INPUTS.x`).
+A wait can also list `pages`: HTML pages the run wrote to its artifacts folder
+that may answer the wait themselves while it is open.
 See [Attention waits](/reference/workflow-language/#attention-waits) for the full
 rules on forms, options and output.
 

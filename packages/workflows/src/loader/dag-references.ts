@@ -454,6 +454,9 @@ function checkWaitReferences(node: DagNode | IncludeDirective, scope: DagScope):
   if (node.wait.attention !== undefined) waitSources.push(['wait.attention', node.wait.attention]);
   for (const [key, label] of Object.entries(node.wait.labels ?? {}))
     waitSources.push([`wait.labels.${key}`, label]);
+  (node.wait.pages ?? []).forEach((page, index) =>
+    waitSources.push([`wait.pages.${String(index)}`, page])
+  );
   if (typeof node.wait.recommendation === 'string')
     waitSources.push(['wait.recommendation', node.wait.recommendation]);
   if (typeof node.wait.options === 'string') {

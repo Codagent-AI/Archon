@@ -20,7 +20,11 @@ import {
   type AttentionAnswer,
   type WorkflowAttentionWaitContext,
 } from '../../../schemas/workflow-run';
-import { waitOutputFormat } from '../../../schemas/wait-node';
+import {
+  attentionPageProblem,
+  normalizeAttentionPage,
+  waitOutputFormat,
+} from '../../../schemas/wait-node';
 import type { WaitCondition, WaitNode, WorkflowWaitContext } from '../../../schemas';
 import { type BodySessionCursorAncestry, type BodySessionCursors } from '../../../schemas';
 import { readWorkflowWaitContext, waitUntilTimestampSchema, waitCondition } from '../../../schemas';
@@ -276,6 +280,7 @@ function armAttention(pass: WaitPass, condition: Extract<WaitCondition, { kind: 
       : Object.fromEntries(
           Object.entries(condition.labels).map(([key, value]) => [key, render(value)])
         );
+  const pages = resolveAttentionPages(node.id, condition.pages, render);
   return {
     kind: 'attention',
     waitingSince: pass.now.toISOString(),
@@ -286,9 +291,30 @@ function armAttention(pass: WaitPass, condition: Extract<WaitCondition, { kind: 
     ...(condition.other === true ? { other: true as const } : {}),
     ...(recommendation !== undefined ? { recommendation } : {}),
     ...(labels !== undefined ? { labels } : {}),
+    ...(pages !== undefined ? { pages } : {}),
     ...(discarded !== undefined ? { reaskedFrom: discarded.occurrence } : {}),
     ...pass.pauseFields,
   } as const;
+}
+
+/** The `pages` after substitution, each checked and normalized; a bad entry fails the node. */
+function resolveAttentionPages(
+  nodeId: string,
+  pages: readonly string[] | undefined,
+  render: (text: string) => string
+): string[] | undefined {
+  if (pages === undefined) return undefined;
+  const resolved = pages.map(raw => {
+    const page = render(raw).trim();
+    const problem = attentionPageProblem(page);
+    if (problem !== undefined) {
+      throw new Error(
+        `Wait node '${nodeId}' resolved a 'pages' entry to '${page}', which ${problem}`
+      );
+    }
+    return normalizeAttentionPage(page);
+  });
+  return [...new Set(resolved)];
 }
 
 /** True when the wait completes on this pass instead of pausing. */

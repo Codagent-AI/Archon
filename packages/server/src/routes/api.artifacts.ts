@@ -12,6 +12,9 @@ import {
 } from '@archon/paths';
 import * as codebaseDb from '@archon/core/db/codebases';
 import * as workflowDb from '@archon/core/db/workflows';
+import { pausedAttentionWait, type WorkflowRun } from '@archon/workflows/schemas/workflow-run';
+import { normalizeAttentionPage } from '@archon/workflows/schemas/wait-node';
+import { isApiGateEnabled } from '../auth';
 import { apiError, getLog, jsonError, openApiRouteRegistrar } from './api-route-kit';
 import { listArtifactsResponseSchema } from './schemas/workflow.schemas';
 
@@ -234,10 +237,13 @@ export function registerArtifactRoutes(app: OpenAPIHono): void {
       return apiError(c, 400, 'Invalid filename');
     }
 
-    // Block path traversal: reject if any segment is ".." or contains null bytes
+    // Block path traversal: reject if any segment is "..", or the name holds a null byte
+    // or a backslash. Names use '/' only, so the file read and the check of an attention
+    // wait's `pages` always name the same file.
     if (
       !rawFilename ||
       rawFilename.includes('\0') ||
+      rawFilename.includes('\\') ||
       rawFilename.split('/').some(s => s === '..')
     ) {
       return apiError(c, 400, 'Invalid filename');
@@ -283,12 +289,13 @@ export function registerArtifactRoutes(app: OpenAPIHono): void {
       );
       return apiError(c, 400, 'Invalid artifact path');
     }
-    return serveArtifactFile(c, runId, artifactDir, filename);
+    return serveArtifactFile(c, run, runId, artifactDir, filename);
   });
 }
 
 async function serveArtifactFile(
   c: Context,
+  run: Pick<WorkflowRun, 'status' | 'metadata'>,
   runId: string,
   artifactDir: string,
   filename: string
@@ -353,7 +360,7 @@ async function serveArtifactFile(
 
   const content = bytes.toString('utf-8');
   if (lower.endsWith('.html') || lower.endsWith('.htm')) {
-    return htmlPage(c, runId, content);
+    return htmlPage(c, runId, content, answersWait(run, runId, filename));
   }
 
   const contentType = filename.endsWith('.md')
@@ -363,6 +370,38 @@ async function serveArtifactFile(
     status: 200,
     headers: { 'Content-Type': contentType },
   });
+}
+
+/** Whether this page may answer the run's wait, warning when the API settings will refuse it. */
+function answersWait(
+  run: Pick<WorkflowRun, 'status' | 'metadata'>,
+  runId: string,
+  filename: string
+): boolean {
+  const named = namesPage(run, filename);
+  if (named && (process.env.WEB_UI_ORIGIN || isApiGateEnabled())) {
+    // The page has an opaque origin and no credential, so a restricted CORS origin or
+    // the API access gate refuses its calls. Answer from the CLI or Web UI instead.
+    getLog().warn(
+      { runId, filename, webUiOrigin: Boolean(process.env.WEB_UI_ORIGIN) },
+      'artifacts.answer_page_blocked_by_api_settings'
+    );
+  }
+  return named;
+}
+
+/**
+ * Whether the run is now paused at an unanswered attention wait whose `pages` name this
+ * file. Read from the run row on each request, so a copy served after the wait is answered,
+ * resumed past, cancelled or finished gets no reach. A browser keeps the policy a document
+ * loaded with, so a tab opened while the wait was open can still call this run's attention
+ * and answer addresses, including at a later wait that does not name it.
+ */
+function namesPage(run: Pick<WorkflowRun, 'status' | 'metadata'>, filename: string): boolean {
+  const wait = pausedAttentionWait(run);
+  if (wait === undefined || wait.answer !== undefined) return false;
+  // The route refuses '\' in requests; on Windows `normalize` turns '/' into '\'.
+  return wait.pages?.includes(normalizeAttentionPage(filename.replaceAll('\\', '/'))) ?? false;
 }
 
 // The origin the browser loaded the page from. A proxy in front of the server,
@@ -392,17 +431,25 @@ function pageOrigin(c: Context): string | null {
 // form-action is 'none'. It may load Google Fonts, and images from its own
 // run's artifacts, named by full URL because 'self' is unreliable for an
 // opaque origin. Links may open new tabs, which leave the sandbox.
-function htmlPage(c: Context, runId: string, content: string): Response {
+// Exception: a page the run's current attention wait names in `pages` may read that
+// wait and answer it, and nothing else, so it can be the wait's answer form.
+function htmlPage(c: Context, runId: string, content: string, answersWait: boolean): Response {
   const origin = pageOrigin(c);
   if (!origin) return apiError(c, 400, 'Invalid Host header');
+  const run = encodeURIComponent(runId);
   const csp = [
     'sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox',
     "default-src 'none'",
     "script-src 'unsafe-inline'",
     "style-src 'unsafe-inline' https://fonts.googleapis.com",
     'font-src https://fonts.gstatic.com',
-    `img-src data: ${origin}/api/artifacts/${encodeURIComponent(runId)}/`,
+    `img-src data: ${origin}/api/artifacts/${run}/`,
     "form-action 'none'",
+    ...(answersWait
+      ? [
+          `connect-src ${origin}/api/runs/${run}/attention ${origin}/api/workflows/runs/${run}/answer`,
+        ]
+      : []),
   ].join('; ');
   return new Response(content, {
     status: 200,
