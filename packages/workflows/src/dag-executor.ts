@@ -43,6 +43,7 @@ import { type RunInputs, type RunLayersContext } from './dag/run-context';
 import { assertRunCapabilities } from './dag/capability-preflight';
 import { runLayers } from './dag/run-layers';
 import { recordOperatorReruns } from './dag/rerun-records';
+import { withDownstreamNodes } from './rerun-nodes';
 import { publishContainerPause, type ContainerPauseReceipt } from './dag/pause';
 import { restoreRunState, type RestoredRunState } from './dag/resume-state';
 import { failRun, finishRun, skipIfStatusChanged } from './dag/run-terminal';
@@ -564,7 +565,7 @@ async function createRunContext(
     nodeOutputs,
     afterLayer,
     priorCompletedNodes,
-    rerunNodeIds,
+    rerunNodeIds: rerunNodeIds && withDownstreamNodes(workflow.plan.layers.flat(), rerunNodeIds),
     replayedFailures,
     nodeSessionHandles,
     namedSessionNodeIds,

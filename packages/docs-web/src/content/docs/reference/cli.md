@@ -1450,10 +1450,10 @@ Resume a failed or paused run by id. Nodes that completed in the earlier attempt
 archon workflow resume <run-id>
 archon workflow resume <run-id> --detach   # continue in a background child
 archon workflow resume <run-id> --json     # validate and acknowledge only
-archon workflow resume <run-id> --rerun <node-id>   # execute this node fresh; repeatable
+archon workflow resume <run-id> --rerun <node-id>   # run this node and everything after it fresh; repeatable
 ```
 
-`--rerun <node-id>` makes a top-level agent, bash or script node execute again instead of replaying its saved result or failure, for example after you fix what made an agent node answer `blocked`. An unknown id, or a node of another kind (a `workflow:` node, gate, wait or loop group, which would find its earlier child runs or answers again), is refused before anything runs. The run records a `node_prior_cache_invalidated` event with `requested_by: operator` for each named node as the resume starts, so the request still holds if the run pauses or fails before reaching the node. If the resume fails before its steps start, for example while preparing its checkout, nothing is recorded: pass `--rerun` again. Nodes that depend on it re-execute only if its new output differs, or always when the node runs only after such a pause.
+`--rerun <node-id>` makes a top-level agent, bash or script node, and every node downstream of it, execute again instead of replaying a saved result or failure, for example after you fix what made an agent node answer `blocked`. An unknown id, or a node of another kind (a `workflow:` node, gate, wait or loop group, which would find its earlier child runs or answers again), is refused before anything runs, as is a rerun with a `workflow:` or fan-out node downstream of it, which would hand back its finished child runs. Downstream gates and waits behave as they do when a dependency changes. As the resume starts, the run records a `node_prior_cache_invalidated` event with `requested_by: operator` for each node it will re-execute, so the request still holds if the run pauses or fails before reaching them. If the resume fails before its steps start, for example while preparing its checkout, nothing is recorded: pass `--rerun` again.
 
 With `--json` the command validates that the run is resumable, reports its state and returns without executing, because execution output would corrupt the JSON. To drive the run to completion, use the blocking form or `--detach`.
 

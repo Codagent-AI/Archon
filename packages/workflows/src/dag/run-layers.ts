@@ -38,11 +38,7 @@ import { dispatchNode } from './dispatch';
 import { nodePackDir } from '../pack-dir';
 import { runWithPackDir } from '../workflow-variables';
 import { getStaleCachedDependencies } from './stale-dependencies';
-import {
-  formatPriorOutput,
-  recordPriorCacheInvalidated,
-  recordRerunDependents,
-} from './rerun-records';
+import { formatPriorOutput, recordPriorCacheInvalidated } from './rerun-records';
 /**
  * Await thunks one at a time, collecting outcomes in `Promise.allSettled` shape so the
  * caller's result handling is identical for the sequential and concurrent paths.
@@ -79,7 +75,6 @@ export async function runLayers(ctx: RunLayersContext): Promise<void> {
     await ctx.toolAttention.refresh();
     const layer = ctx.layers[layerIdx];
     await runLayer(ctx, layer, layerIdx);
-    await recordRerunDependents(ctx, layer);
 
     await ctx.afterLayer?.();
 
@@ -347,9 +342,7 @@ async function replayPriorSuccess(
     ctx.replayedFailures
   );
   if (staleDeps.length > 0) {
-    // recordRerunDependents may have recorded this already, when a --rerun dependency changed.
-    if (!ctx.rerunInvalidated?.has(node.id))
-      await recordPriorCacheInvalidated(ctx, node, priorCompletedNodes, staleDeps);
+    await recordPriorCacheInvalidated(ctx, node, priorCompletedNodes, staleDeps);
     return undefined;
   }
   return replayCachedSuccess(ctx, node, priorCompletedNodes);

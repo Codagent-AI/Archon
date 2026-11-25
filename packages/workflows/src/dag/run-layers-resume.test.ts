@@ -1115,49 +1115,41 @@ describe('executeDagWorkflow -- prior-success cache invalidated by dep re-execut
     return { queryCount: () => queryCount, eventFor };
   }
 
-  it('executes a --rerun node fresh and re-executes its dependent when the output changed', async () => {
-    const { queryCount, eventFor } = await resumeWithRerun('unblocked answer', ['producer']);
-
-    expect(queryCount()).toBe(2);
-    expect(eventFor('node_skipped_prior_success', 'producer')).toBeUndefined();
-    const invalidated = eventFor('node_prior_cache_invalidated', 'producer');
-    expect(invalidated?.data.requested_by).toBe('operator');
-    expect(invalidated?.data.invalidating_deps).toEqual([]);
-    expect(invalidated?.data.prior_output).toBe('blocked answer');
-    // The dependent follows the ordinary stale-dependency rule, not the operator's request.
-    const dependent = eventFor('node_prior_cache_invalidated', 'consumer');
-    expect(dependent?.data.invalidating_deps).toEqual(['producer']);
-    expect(dependent?.data.requested_by).toBeUndefined();
-  });
-
-  it('executes a --rerun node fresh but replays its dependent when the output is unchanged', async () => {
-    const { queryCount, eventFor } = await resumeWithRerun('blocked answer', ['producer']);
-
-    expect(queryCount()).toBe(1);
-    expect(eventFor('node_prior_cache_invalidated', 'producer')?.data.requested_by).toBe(
-      'operator'
-    );
-    expect(eventFor('node_skipped_prior_success', 'consumer')).toBeDefined();
-    expect(eventFor('node_prior_cache_invalidated', 'consumer')).toBeUndefined();
-  });
-
   it.each([
-    ['records', 'changed', 'unblocked answer', ['producer']],
-    ['does not record', 'unchanged', 'blocked answer', undefined],
+    ['changed', 'unblocked answer'],
+    ['unchanged', 'blocked answer'],
   ] as const)(
-    '%s a dependent invalidation before a pause when the --rerun output is %s',
-    async (_verb, _change, producerOutput, expectedDeps) => {
-      const { queryCount, eventFor } = await resumeWithRerun(producerOutput, ['producer'], true);
+    'executes a --rerun node and its dependent fresh when the output is %s',
+    async (_change, producerOutput) => {
+      const { queryCount, eventFor } = await resumeWithRerun(producerOutput, ['producer']);
 
-      // The run pauses after the producer, so the consumer is never admitted this pass: only
-      // the recorded row keeps the next pass from replaying a result computed from the old output.
-      expect(queryCount()).toBe(1);
-      expect(eventFor('node_started', 'consumer')).toBeUndefined();
-      expect(eventFor('node_prior_cache_invalidated', 'consumer')?.data.invalidating_deps).toEqual(
-        expectedDeps
-      );
+      expect(queryCount()).toBe(2);
+      expect(eventFor('node_skipped_prior_success', 'producer')).toBeUndefined();
+      expect(eventFor('node_skipped_prior_success', 'consumer')).toBeUndefined();
+      const invalidated = eventFor('node_prior_cache_invalidated', 'producer');
+      expect(invalidated?.data).toMatchObject({
+        requested_by: 'operator',
+        invalidating_deps: [],
+        prior_output: 'blocked answer',
+      });
+      expect(eventFor('node_prior_cache_invalidated', 'consumer')?.data).toMatchObject({
+        requested_by: 'operator',
+        invalidating_deps: ['producer'],
+      });
     }
   );
+
+  it('records the downstream invalidation before dispatch, so a pause after the --rerun node keeps it', async () => {
+    const { queryCount, eventFor } = await resumeWithRerun('blocked answer', ['producer'], true);
+
+    // The run pauses after the producer, so the consumer is never admitted this pass: only the
+    // row recorded up front keeps the next pass from replaying its result.
+    expect(queryCount()).toBe(1);
+    expect(eventFor('node_started', 'consumer')).toBeUndefined();
+    expect(eventFor('node_prior_cache_invalidated', 'consumer')?.data.requested_by).toBe(
+      'operator'
+    );
+  });
 
   it('replays every node when none is named for --rerun', async () => {
     const { queryCount, eventFor } = await resumeWithRerun('unused', []);
@@ -1173,6 +1165,9 @@ describe('executeDagWorkflow -- prior-success cache invalidated by dep re-execut
     >,
     nodeIds: string[]
   ) {
+    for (const id of nodeIds) {
+      await writeFile(join(testDir, '.archon', 'commands', `${id}.md`), `${id} prompt`);
+    }
     let queryCount = 0;
     mockSendQueryDag.mockImplementation(async function* () {
       queryCount++;
@@ -1224,6 +1219,29 @@ describe('executeDagWorkflow -- prior-success cache invalidated by dep re-execut
     );
     expect(invalidatedAt).toBeGreaterThanOrEqual(0);
     expect(firstStartedAt).toBeGreaterThan(invalidatedAt);
+  });
+
+  it('re-runs everything downstream of a --rerun node, transitively, and replays what is upstream', async () => {
+    const { queryCount, events } = await resumeFresh(
+      {
+        priorCompletedNodes: new Map<string, PersistedNodeOutput>([
+          ['a', { output: 'a done' }],
+          ['b', { output: 'b blocked' }],
+          ['c', { output: 'c done' }],
+        ]),
+        rerunNodeIds: new Set(['b']),
+      },
+      ['a', 'b', 'c']
+    );
+
+    const invalidated = (node: string) =>
+      events.find(
+        event => event.event_type === 'node_prior_cache_invalidated' && event.step_name === node
+      )?.data;
+    expect(queryCount()).toBe(2);
+    expect(invalidated('a')).toBeUndefined();
+    expect(invalidated('b')).toMatchObject({ requested_by: 'operator', invalidating_deps: [] });
+    expect(invalidated('c')).toMatchObject({ requested_by: 'operator', invalidating_deps: ['b'] });
   });
 
   it('records a --rerun for a node with no reusable prior result, such as a failure on a retry', async () => {

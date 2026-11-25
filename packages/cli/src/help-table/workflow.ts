@@ -147,7 +147,7 @@ export const workflowHelp: HelpGroup = {
         {
           spec: '--rerun <node-id>',
           description:
-            'Execute this top-level agent, bash or script node fresh instead of replaying it; repeatable',
+            'Execute this top-level agent, bash or script node and everything downstream of it fresh; repeatable',
         },
       ],
     },

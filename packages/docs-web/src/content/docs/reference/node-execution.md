@@ -55,7 +55,7 @@ Cache decisions carry no new attempt, provider binding, timing, or newly consume
 
 - Replayed: `node_skipped_prior_success`, with the reusable output under the normal output keys.
 - Reset: `node_always_run_reset`, with prior output and its truncation/spill provenance under `prior_*` keys.
-- Invalidated: `node_prior_cache_invalidated`, with prior output, prior structured output when present, and `invalidating_deps`. A dependency change adds `reason: stale_dependency`; an operator's `workflow resume --rerun` adds `requested_by: "operator"` instead, with empty `invalidating_deps`.
+- Invalidated: `node_prior_cache_invalidated`, with prior output, prior structured output when present, and `invalidating_deps`. A dependency change adds `reason: stale_dependency`; an operator's `workflow resume --rerun` adds `requested_by: "operator"` instead, with `invalidating_deps` empty on a named node and listing, on a node downstream of it, the dependencies the rerun reaches it through.
 
 A skipped execution instead carries a lifecycle reason and typed `cause`. The cause identifies condition evaluation, a condition parse error, timeout, or an upstream failure/skip with its origin. Cache records and skip lifecycle records are separate contracts.
 

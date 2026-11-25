@@ -368,6 +368,7 @@ describe('InProcessWorkflowEngine', () => {
   it.each([
     ['the workflow lacks', 'nope', "Cannot rerun 'nope': workflow 'parent' has no"],
     ['whose kind a fresh pass would not re-run', 'child', "Cannot rerun 'child': it is a workflow"],
+    ['with a node downstream that reuses child runs', 'first', "'child' runs after it"],
   ])('refuses a rerun node %s before claiming the run', async (_case, rerunId, refusal) => {
     const { engine, store } = await makeEngine();
     const run = await store.createWorkflowRun({ workflow_name: parent.name, user_message: '' });
