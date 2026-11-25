@@ -128,3 +128,6 @@ main/
 
 # Personal per-run config overlays (workflow run --config) — never tracked
 .config.*.yaml
+
+# Agent Validator logs
+validator_logs
