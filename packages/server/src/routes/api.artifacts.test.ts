@@ -8,6 +8,7 @@ import {
   makeApp,
 } from '../test/api-workflow-runs-harness';
 import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
+import { getLog } from './api-route-kit';
 import { removeTempTree } from '@archon/paths/test-utils';
 import { mkdir, mkdtemp, symlink, writeFile, realpath, utimes } from 'fs/promises';
 import * as fsPromises from 'fs/promises';
@@ -347,6 +348,28 @@ describe('GET /api/runs/:runId/artifacts', () => {
         'connect-src http://localhost:3090/api/runs/run%20with%20space/attention ' +
           'http://localhost:3090/api/workflows/runs/run%20with%20space/answer'
       );
+    });
+
+    test('warns when a restricted CORS origin will refuse the named page', async () => {
+      const warning = 'artifacts.answer_page_blocked_by_api_settings';
+      const warn = spyOn(getLog(), 'warn');
+      const original = process.env.WEB_UI_ORIGIN;
+      try {
+        delete process.env.WEB_UI_ORIGIN;
+        await csp(waitingRun(attention()), 'review/page.html');
+        process.env.WEB_UI_ORIGIN = 'http://ui.example';
+        await csp(waitingRun(attention()), 'other.html');
+        expect(warn).not.toHaveBeenCalledWith(expect.anything(), warning);
+        await csp(waitingRun(attention()), 'review/page.html');
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({ runId, filename: 'review/page.html' }),
+          warning
+        );
+      } finally {
+        if (original === undefined) delete process.env.WEB_UI_ORIGIN;
+        else process.env.WEB_UI_ORIGIN = original;
+        warn.mockRestore();
+      }
     });
 
     // A sandboxed page has an opaque origin: its requests carry `Origin: null`, and its
@@ -809,11 +832,10 @@ describe('GET /api/artifacts/:runId/* storage-key resolution', () => {
     expect(body.error).toBe('Artifact file not found');
   });
 
-  test('a backslash climb out of the artifacts directory is refused on Windows', async () => {
+  test('a backslash climb out of the artifacts directory is refused', async () => {
     // The route's `..` segment check splits on `/` only. On Windows `\` is a
-    // separator too, so only the containment check stops `..\` from leaving the
-    // run's directory for a sibling run whose name shares this one's prefix.
-    // On POSIX `\` is an ordinary filename character and the name stays inside.
+    // separator too, so `..\` could leave the run's directory for a sibling run
+    // whose name shares this one's prefix. The route refuses any `\`.
     const runId = 'run-serve-backslash';
     const runsDir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs');
     await mkdir(join(runsDir, runId), { recursive: true });
@@ -833,12 +855,8 @@ describe('GET /api/artifacts/:runId/* storage-key resolution', () => {
     const escape = encodeURIComponent(`..\\${runId}-old\\plan.md`);
     const response = await app.request(`/api/artifacts/${runId}/${escape}`);
 
-    if (process.platform === 'win32') {
-      expect(response.status).toBe(400);
-      expect(await response.json()).toEqual({ error: 'Invalid filename' });
-    } else {
-      expect(response.status).toBe(404);
-    }
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'Invalid filename' });
   });
 
   test('an artifact pointer from a run result addresses this route with no extra machinery', async () => {

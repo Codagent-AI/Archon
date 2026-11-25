@@ -14,6 +14,7 @@ import * as codebaseDb from '@archon/core/db/codebases';
 import * as workflowDb from '@archon/core/db/workflows';
 import { pausedAttentionWait, type WorkflowRun } from '@archon/workflows/schemas/workflow-run';
 import { normalizeAttentionPage } from '@archon/workflows/schemas/wait-node';
+import { isApiGateEnabled } from '../auth';
 import { apiError, getLog, jsonError, openApiRouteRegistrar } from './api-route-kit';
 import { listArtifactsResponseSchema } from './schemas/workflow.schemas';
 
@@ -236,10 +237,13 @@ export function registerArtifactRoutes(app: OpenAPIHono): void {
       return apiError(c, 400, 'Invalid filename');
     }
 
-    // Block path traversal: reject if any segment is ".." or contains null bytes
+    // Block path traversal: reject if any segment is "..", or the name holds a null byte
+    // or a backslash. Names use '/' only, so the file read and the check of an attention
+    // wait's `pages` always name the same file.
     if (
       !rawFilename ||
       rawFilename.includes('\0') ||
+      rawFilename.includes('\\') ||
       rawFilename.split('/').some(s => s === '..')
     ) {
       return apiError(c, 400, 'Invalid filename');
@@ -356,7 +360,16 @@ async function serveArtifactFile(
 
   const content = bytes.toString('utf-8');
   if (lower.endsWith('.html') || lower.endsWith('.htm')) {
-    return htmlPage(c, runId, content, namesPage(run, filename));
+    const answersWait = namesPage(run, filename);
+    if (answersWait && (process.env.WEB_UI_ORIGIN || isApiGateEnabled())) {
+      // The page has an opaque origin and no credential, so a restricted CORS origin or
+      // the API access gate refuses its calls. Answer from the CLI or Web UI instead.
+      getLog().warn(
+        { runId, filename, webUiOrigin: Boolean(process.env.WEB_UI_ORIGIN) },
+        'artifacts.answer_page_blocked_by_api_settings'
+      );
+    }
+    return htmlPage(c, runId, content, answersWait);
   }
 
   const contentType = filename.endsWith('.md')
@@ -370,12 +383,15 @@ async function serveArtifactFile(
 
 /**
  * Whether the run is now paused at an unanswered attention wait whose `pages` name this
- * file. Read from the run row each request, so a page loses its reach the moment the wait
- * is answered, resumed past, cancelled or finished.
+ * file. Read from the run row on each request, so a copy served after the wait is answered,
+ * resumed past, cancelled or finished gets no reach. A browser keeps the policy a document
+ * loaded with, so a tab opened while the wait was open can still call this run's attention
+ * and answer addresses, including at a later wait that does not name it.
  */
 function namesPage(run: Pick<WorkflowRun, 'status' | 'metadata'>, filename: string): boolean {
   const wait = pausedAttentionWait(run);
   if (wait === undefined || wait.answer !== undefined) return false;
+  // The route refuses '\' in requests; on Windows `normalize` turns '/' into '\'.
   return wait.pages?.includes(normalizeAttentionPage(filename.replaceAll('\\', '/'))) ?? false;
 }
 
