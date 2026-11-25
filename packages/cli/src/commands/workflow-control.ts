@@ -22,6 +22,7 @@ import {
   resolveRunIdArg,
   spelledForCli,
 } from './workflow-shared';
+import { resumeChecked } from './workflow-rerun';
 import { runDetachedControlCommand } from './workflow-detach';
 import { assertResumeWorkingPathExists } from './workflow-isolation';
 import { workflowRunCommand } from './workflow-run-owned';
@@ -40,10 +41,9 @@ export async function workflowResumeCommand(
   runId: string,
   json?: boolean,
   cwd?: string,
-  detach?: boolean
+  detach?: boolean,
+  rerun: string[] = []
 ): Promise<number> {
-  const { resumeWorkflow: resumeWorkflowOp } = host.operations;
-
   // --detach: validate read-only (resumeWorkflowOp checks the run is resumable),
   // then let a detached child re-invoke the blocking resume and own all mutation
   // + execution, so a reaped launching shell can't wedge the run mid-resume.
@@ -51,7 +51,7 @@ export async function workflowResumeCommand(
   if (detach) {
     const resolvedId = await resolveRunIdArg(host, runId, cwd);
     return runDetachedControlCommand(resolvedId, 'resume', json, cwd, async () => {
-      const run = await resumeWorkflowOp(resolvedId, { kind: 'operator' });
+      const run = await resumeChecked(host, resolvedId, rerun);
       // The inline path below refuses a run with no recorded working path, or one
       // whose checkout is gone. Check both here too, on the run the precheck already
       // holds: otherwise the parent acks success and the child throws where nobody
@@ -78,7 +78,7 @@ export async function workflowResumeCommand(
   if (json) {
     try {
       const resolvedId = await resolveRunIdArg(host, runId, cwd);
-      const run = await resumeWorkflowOp(resolvedId, { kind: 'operator' });
+      const run = await resumeChecked(host, resolvedId, rerun);
       await writeJsonLine({
         ok: true,
         runId: resolvedId,
@@ -96,7 +96,7 @@ export async function workflowResumeCommand(
   }
 
   const resolvedId = await resolveRunIdArg(host, runId, cwd);
-  const run = await resumeWorkflowOp(resolvedId, { kind: 'operator' });
+  const run = await resumeChecked(host, resolvedId, rerun);
   if (!run.working_path) {
     throw new Error(
       `Workflow run '${resolvedId}' has no working path recorded.\n` +
@@ -122,6 +122,7 @@ export async function workflowResumeCommand(
       // Continue from the source this run froze, not a fresh capture of the target.
       continuationRun: run,
       resume: true,
+      rerun,
       codebaseId: run.codebase_id ?? undefined,
       discoveryCwd,
     });

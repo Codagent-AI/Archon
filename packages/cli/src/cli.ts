@@ -243,6 +243,11 @@ async function runParsedCommand({ values, positionals }: ParsedCliArgs): Promise
     await shutdownTelemetry();
     return 1;
   }
+  if (values.rerun !== undefined && (command !== 'workflow' || subcommand !== 'resume')) {
+    await fail(values.json === true, '--rerun is only supported by workflow resume.');
+    await shutdownTelemetry();
+    return 1;
+  }
   // Apply output policy before install discovery: its best-effort debug logs
   // must never prefix a machine-readable response.
   applyOutputPolicy(values, command, subcommand);

@@ -1061,6 +1061,174 @@ describe('executeDagWorkflow -- prior-success cache invalidated by dep re-execut
     expect(consumerSkippedEvent).toBeDefined();
   });
 
+  async function resumeWithRerun(producerOutput: string, rerunNodeIds: string[]) {
+    let queryCount = 0;
+    mockSendQueryDag.mockImplementation(async function* () {
+      queryCount++;
+      yield {
+        type: 'agent_message_chunk',
+        text: queryCount === 1 ? producerOutput : 'fresh consumer',
+      };
+      yield { type: 'result', sessionId: 'session-id' };
+    });
+    const store = createMockStore();
+    await executeDagWorkflow(
+      dagOptions({
+        deps: createMockDeps(store),
+        platform: createMockPlatform(),
+        conversationId: 'conv-rerun',
+        cwd: testDir,
+        workflow: {
+          name: 'rerun-node',
+          nodes: [
+            { id: 'producer', kind: 'agent', source: { kind: 'command', name: 'producer' } },
+            {
+              id: 'consumer',
+              kind: 'agent',
+              source: { kind: 'command', name: 'consumer' },
+              depends_on: ['producer'],
+            },
+          ],
+        },
+        workflowRun: makeWorkflowRun(),
+        priorCompletedNodes: new Map<string, PersistedNodeOutput>([
+          ['producer', { output: 'blocked answer' }],
+          ['consumer', { output: 'cached consumer' }],
+        ]),
+        rerunNodeIds: new Set(rerunNodeIds),
+      })
+    );
+    const events = (store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls.map(
+      call => call[0] as { event_type: string; step_name: string; data: Record<string, unknown> }
+    );
+    const eventFor = (eventType: string, node: string) =>
+      events.find(event => event.event_type === eventType && event.step_name === node);
+    return { queryCount: () => queryCount, eventFor };
+  }
+
+  it('executes a --rerun node fresh and re-executes its dependent when the output changed', async () => {
+    const { queryCount, eventFor } = await resumeWithRerun('unblocked answer', ['producer']);
+
+    expect(queryCount()).toBe(2);
+    expect(eventFor('node_skipped_prior_success', 'producer')).toBeUndefined();
+    const invalidated = eventFor('node_prior_cache_invalidated', 'producer');
+    expect(invalidated?.data.requested_by).toBe('operator');
+    expect(invalidated?.data.invalidating_deps).toEqual([]);
+    expect(invalidated?.data.prior_output).toBe('blocked answer');
+    // The dependent follows the ordinary stale-dependency rule, not the operator's request.
+    const dependent = eventFor('node_prior_cache_invalidated', 'consumer');
+    expect(dependent?.data.invalidating_deps).toEqual(['producer']);
+    expect(dependent?.data.requested_by).toBeUndefined();
+  });
+
+  it('executes a --rerun node fresh but replays its dependent when the output is unchanged', async () => {
+    const { queryCount, eventFor } = await resumeWithRerun('blocked answer', ['producer']);
+
+    expect(queryCount()).toBe(1);
+    expect(eventFor('node_prior_cache_invalidated', 'producer')?.data.requested_by).toBe(
+      'operator'
+    );
+    expect(eventFor('node_skipped_prior_success', 'consumer')).toBeDefined();
+    expect(eventFor('node_prior_cache_invalidated', 'consumer')).toBeUndefined();
+  });
+
+  it('replays every node when none is named for --rerun', async () => {
+    const { queryCount, eventFor } = await resumeWithRerun('unused', []);
+
+    expect(queryCount()).toBe(0);
+    expect(eventFor('node_skipped_prior_success', 'producer')).toBeDefined();
+  });
+
+  async function resumeFresh(
+    options: Pick<
+      Parameters<typeof dagOptions>[0],
+      'priorCompletedNodes' | 'replayedFailures' | 'rerunNodeIds'
+    >,
+    nodeIds: string[]
+  ) {
+    let queryCount = 0;
+    mockSendQueryDag.mockImplementation(async function* () {
+      queryCount++;
+      yield { type: 'agent_message_chunk', text: `fresh ${String(queryCount)}` };
+      yield { type: 'result', sessionId: 'session-id' };
+    });
+    const store = createMockStore();
+    await executeDagWorkflow(
+      dagOptions({
+        deps: createMockDeps(store),
+        platform: createMockPlatform(),
+        conversationId: 'conv-rerun-fresh',
+        cwd: testDir,
+        workflow: {
+          name: 'rerun-fresh',
+          nodes: nodeIds.map((id, index) => ({
+            id,
+            kind: 'agent' as const,
+            source: { kind: 'command' as const, name: id },
+            ...(index > 0 ? { depends_on: [nodeIds[index - 1]] } : {}),
+          })),
+        },
+        workflowRun: makeWorkflowRun(),
+        ...options,
+      })
+    );
+    const events = (store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls.map(
+      call => call[0] as { event_type: string; step_name: string; data: Record<string, unknown> }
+    );
+    return { queryCount: () => queryCount, events };
+  }
+
+  it('records a --rerun before any node dispatches, so a later continuation still re-runs it', async () => {
+    const { events } = await resumeFresh(
+      {
+        priorCompletedNodes: new Map<string, PersistedNodeOutput>([
+          ['later', { output: 'blocked answer' }],
+        ]),
+        rerunNodeIds: new Set(['later']),
+      },
+      ['first', 'later']
+    );
+
+    const invalidatedAt = events.findIndex(
+      event => event.event_type === 'node_prior_cache_invalidated' && event.step_name === 'later'
+    );
+    const firstStartedAt = events.findIndex(
+      event => event.event_type === 'node_started' && event.step_name === 'first'
+    );
+    expect(invalidatedAt).toBeGreaterThanOrEqual(0);
+    expect(firstStartedAt).toBeGreaterThan(invalidatedAt);
+  });
+
+  it('records a --rerun for a node with no reusable prior result, such as a failure on a retry', async () => {
+    // On a retry of a failed run, the failed node is in neither the prior successes nor the
+    // replayed failures, yet a continuation after a later pause would replay its failure.
+    const { events } = await resumeFresh({ rerunNodeIds: new Set(['later']) }, ['first', 'later']);
+
+    const invalidatedAt = events.findIndex(
+      event => event.event_type === 'node_prior_cache_invalidated' && event.step_name === 'later'
+    );
+    const firstStartedAt = events.findIndex(
+      event => event.event_type === 'node_started' && event.step_name === 'first'
+    );
+    expect(events[invalidatedAt]?.data.requested_by).toBe('operator');
+    expect(firstStartedAt).toBeGreaterThan(invalidatedAt);
+  });
+
+  it('executes a --rerun node fresh instead of replaying its failure from before a pause', async () => {
+    const { queryCount, events } = await resumeFresh(
+      {
+        replayedFailures: new Map([['producer', { error: 'blocked before the pause' }]]),
+        rerunNodeIds: new Set(['producer']),
+      },
+      ['producer']
+    );
+
+    expect(queryCount()).toBe(1);
+    const invalidated = events.find(event => event.event_type === 'node_prior_cache_invalidated');
+    expect(invalidated?.data.requested_by).toBe('operator');
+    expect(events.some(event => event.event_type === 'node_completed')).toBe(true);
+  });
+
   it('invalidates a cached downstream when a dep that was never cached completes fresh this resume', async () => {
     // A dep can be missing from priorCompletedNodes for two reasons: it never completed
     // in the prior run, or it completed but its row was lost. The pre-populate loop

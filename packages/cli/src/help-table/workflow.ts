@@ -143,6 +143,13 @@ export const workflowHelp: HelpGroup = {
       subcommand: 'resume',
       spec: 'workflow resume <run-id>',
       description: 'Resume a failed or paused run from completed nodes',
+      scopedFlags: [
+        {
+          spec: '--rerun <node-id>',
+          description:
+            'Execute this top-level agent, bash or script node fresh instead of replaying it; repeatable',
+        },
+      ],
     },
     {
       command: 'workflow',

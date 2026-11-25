@@ -65,6 +65,8 @@ export type PriorRunUsage = Pick<DagResumeSnapshot, 'tokens' | 'tokensUnknown' |
 export interface ExecuteDagWorkflowOptions extends RunInputs {
   workflow: ResolvedWorkflow;
   priorCompletedNodes?: Map<string, PersistedNodeOutput>;
+  /** Node ids to execute fresh instead of replaying their prior success. */
+  rerunNodeIds?: ReadonlySet<string>;
   /** Failures from before a pause, replayed instead of re-running their nodes. */
   replayedFailures?: ReadonlyMap<string, PriorFailedNode>;
   /**
@@ -481,6 +483,7 @@ async function createRunContext(
     configuredCommandFolder,
     issueContext,
     priorCompletedNodes,
+    rerunNodeIds,
     replayedFailures,
     aiProfile,
     workflowPreset,
@@ -558,6 +561,7 @@ async function createRunContext(
     nodeOutputs,
     afterLayer,
     priorCompletedNodes,
+    rerunNodeIds,
     replayedFailures,
     nodeSessionHandles,
     namedSessionNodeIds,

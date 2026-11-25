@@ -42,7 +42,11 @@ export function describeResumeReductionConformance(getHarness: () => WorkflowSto
           step_name: 'invalidated',
           data: { node_output: 'stale' },
         },
-        { event_type: 'node_prior_cache_invalidated' as const, step_name: 'invalidated', data: {} },
+        {
+          event_type: 'node_prior_cache_invalidated' as const,
+          step_name: 'invalidated',
+          data: { requested_by: 'operator', invalidating_deps: [] },
+        },
         { event_type: 'node_started' as const, step_name: 'unfinished', data: {} },
         {
           event_type: 'node_failed' as const,

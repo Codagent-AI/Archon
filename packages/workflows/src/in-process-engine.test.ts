@@ -365,6 +365,30 @@ describe('InProcessWorkflowEngine', () => {
     }
   });
 
+  it.each([
+    ['the workflow lacks', 'nope', "Cannot rerun 'nope': workflow 'parent' has no"],
+    ['whose kind a fresh pass would not re-run', 'child', "Cannot rerun 'child': it is a workflow"],
+  ])('refuses a rerun node %s before claiming the run', async (_case, rerunId, refusal) => {
+    const { engine, store } = await makeEngine();
+    const run = await store.createWorkflowRun({ workflow_name: parent.name, user_message: '' });
+    await completeNode(store, run.id, 'first');
+    await store.failWorkflowRun(run.id, 'interrupted');
+    const failed = await store.getWorkflowRun(run.id);
+    if (!failed) throw new Error('expected failed run');
+    await expect(
+      engine.resume({
+        platform,
+        conversationId: 'conv-1',
+        cwd: '/tmp/ops',
+        userMessage: '',
+        run: failed,
+        legacyWorkflow: parent,
+        rerunNodeIds: ['first', rerunId],
+      })
+    ).rejects.toThrow(refusal);
+    expect((await store.getWorkflowRun(run.id))?.status).toBe('failed');
+  });
+
   it.each(['preparation', 'configuration', 'stamp'] as const)(
     'public resume failure preserves a replaced claim during %s',
     async phase => {

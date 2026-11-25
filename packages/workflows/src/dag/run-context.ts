@@ -249,6 +249,12 @@ export interface RunLayersContext extends RunInputs, RunDerived {
   /** Resume cache: node ids that completed in a prior run (top-level only; undefined for body). */
   priorCompletedNodes?: Map<string, PersistedNodeOutput>;
   /**
+   * Top-level node ids an operator asked to execute fresh on this resume
+   * (`workflow resume --rerun`): they skip prior-success replay. Dependents follow the
+   * usual stale-dependency rule against the node's prior snapshot.
+   */
+  rerunNodeIds?: ReadonlySet<string>;
+  /**
    * Failures a run continued after a pause had already moved past (top-level only):
    * those nodes replay their failure instead of running again. Undefined on a retry.
    */

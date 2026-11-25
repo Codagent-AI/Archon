@@ -1,5 +1,6 @@
 import { executeWorkflow, type ExecuteWorkflowOptions } from './executor';
 import { hydrateResumableRun } from './run-resume';
+import { assertRerunNodeIds } from './rerun-nodes';
 import { resolveContinuationWorkflow } from './run-source';
 import {
   FRESH_RUN_FORBIDDEN_OPTIONS,
@@ -79,6 +80,7 @@ export class InProcessWorkflowEngine implements IWorkflowEngine {
       }
       workflow = input.legacyWorkflow;
     }
+    assertRerunNodeIds(workflow, input.rerunNodeIds);
     const hydrated = await hydrateResumableRun(this.deps, input.run, input.cursor);
     if (hydrated === null) return { accepted: false, reason: 'nothing-to-resume' };
 
@@ -117,7 +119,11 @@ export class InProcessWorkflowEngine implements IWorkflowEngine {
       workflow,
       input.userMessage,
       hydrated.preCreatedRun.origin ?? undefined,
-      { ...context.options, ...hydrated }
+      {
+        ...context.options,
+        ...hydrated,
+        ...(input.rerunNodeIds?.length ? { rerunNodeIds: input.rerunNodeIds } : {}),
+      }
     );
     return { accepted: true, runId: hydrated.preCreatedRun.id, settled };
   }

@@ -67,6 +67,7 @@ async function settleSequentially(
  */
 export async function runLayers(ctx: RunLayersContext): Promise<void> {
   // nodeOutputs + accumulators + lastSequentialSession are mutated in place on `ctx`.
+  await recordOperatorReruns(ctx);
 
   for (let layerIdx = 0; layerIdx < ctx.layers.length; layerIdx++) {
     if (ctx.containerPause?.publish && ctx.claimedWorkPausePolicy !== 'finish_through_parent_pause')
@@ -189,7 +190,7 @@ async function runLayerPhase(
  */
 function replayPriorFailure(ctx: RunLayersContext, node: DagNode): LayerNodeResult | undefined {
   const failure = ctx.replayedFailures?.get(node.id);
-  if (failure === undefined || node.always_run) return undefined;
+  if (failure === undefined || node.always_run || ctx.rerunNodeIds?.has(node.id)) return undefined;
   getLog().info(
     { workflowRunId: ctx.workflowRun.id, nodeId: node.id },
     'dag.node_prior_failure_replayed'
@@ -312,7 +313,7 @@ async function suppressFailedLoopInteraction(
 
 /**
  * Replay a node's prior-pass success, or record why it re-executes instead: `always_run`,
- * or a dependency whose value changed since (#2402). Undefined when the node re-executes.
+ * an operator's `--rerun`, or a dependency whose value changed since (#2402). Undefined when the node re-executes.
  */
 async function replayPriorSuccess(
   ctx: RunLayersContext,
@@ -324,6 +325,8 @@ async function replayPriorSuccess(
     await recordAlwaysRunReset(ctx, node, priorCompletedNodes);
     return undefined;
   }
+  // recordOperatorReruns already recorded why this node runs again.
+  if (ctx.rerunNodeIds?.has(node.id)) return undefined;
   if (!priorSuccessIsEligible(ctx, node, composedBoundaryDecision)) return undefined;
   // #2402 — a cached prior-success skip is only safe when every
   // dependency's current value still matches the prior snapshot.
@@ -343,6 +346,23 @@ async function replayPriorSuccess(
     return undefined;
   }
   return replayCachedSuccess(ctx, node, priorCompletedNodes);
+}
+
+/**
+ * Record an operator's `--rerun` for each named node before any node dispatches. The resume
+ * fold drops a node's prior success or failure at this row, so the request still holds when
+ * the run pauses or fails before the node's layer and continues later without `--rerun`. Every
+ * named node gets the row: a failed node's failure is not in this segment's context on a retry,
+ * yet a later continuation after a pause would replay it. Top-level DAG only: loop bodies and
+ * fan-out instances re-run in full.
+ */
+async function recordOperatorReruns(ctx: RunLayersContext): Promise<void> {
+  if (!ctx.rerunNodeIds?.size || ctx.stepNamePrefix !== '') return;
+  const prior = ctx.priorCompletedNodes ?? new Map<string, PersistedNodeOutput>();
+  for (const node of ctx.layers.flat()) {
+    if (!ctx.rerunNodeIds.has(node.id)) continue;
+    await recordPriorCacheInvalidated(ctx, node, prior, [], 'operator');
+  }
 }
 
 function formatPriorOutput(
@@ -396,13 +416,14 @@ async function recordPriorCacheInvalidated(
   ctx: RunLayersContext,
   node: DagNode,
   priorCompletedNodes: ReadonlyMap<string, PersistedNodeOutput>,
-  staleDeps: string[]
+  staleDeps: string[],
+  requestedBy?: 'operator'
 ): Promise<void> {
   // Same rationale as the always_run reset: prior.output can be the full
   // spilled text, so this audit row needs the same bounding (#2726).
   const priorOutput = formatPriorOutput(ctx, node, priorCompletedNodes);
   getLog().info(
-    { nodeId: node.id, invalidatingDeps: staleDeps },
+    { nodeId: node.id, invalidatingDeps: staleDeps, requestedBy },
     'dag.node_prior_cache_invalidated'
   );
   await recordNodeState(
@@ -414,6 +435,7 @@ async function recordPriorCacheInvalidated(
       cache: {
         action: 'invalidated',
         invalidatingDeps: staleDeps,
+        ...(requestedBy === undefined ? {} : { requestedBy }),
         prior: {
           ...persistedExecutionOutput(priorOutput),
           structured: priorCompletedNodes.get(node.id)?.structuredOutput,

@@ -21,6 +21,7 @@ export class WorkflowExecutionHandoffError extends Error {
 // These lists own both the public input exclusions and their runtime validation.
 export const FRESH_RUN_FORBIDDEN_OPTIONS = [
   'priorCompletedNodes',
+  'rerunNodeIds',
   'priorFailedNodes',
   'resumeCause',
   'priorUsage',
@@ -66,6 +67,12 @@ export interface WorkflowResumeInput extends WorkflowEngineCallBase {
   /** Used only for runs created before frozen workflow-source captures existed. */
   legacyWorkflow?: ResolvedWorkflow;
   cursor?: WorkflowResumeCursor;
+  /**
+   * Top-level node ids to execute fresh instead of replaying their prior success.
+   * Each must name a node of the run's workflow, or the resume is refused before the run
+   * is claimed.
+   */
+  rerunNodeIds?: readonly string[];
   options?: WorkflowResumeOptions;
   /**
    * Runs after committed admission; rejection fails the admitted run.

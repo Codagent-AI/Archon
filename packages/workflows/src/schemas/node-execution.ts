@@ -279,6 +279,8 @@ export const nodeCacheRecordSchema = z.object({
       action: z.literal('invalidated'),
       prior: executionOutputSchema,
       invalidatingDeps: z.array(z.string()),
+      /** Set when an operator named the node (`workflow resume --rerun`); `invalidatingDeps` is then empty. */
+      requestedBy: z.literal('operator').optional(),
     }),
   ]),
 });
