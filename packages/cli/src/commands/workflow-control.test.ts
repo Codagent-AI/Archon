@@ -248,6 +248,63 @@ describe('write command --json output', () => {
     expect(discoverSpy).not.toHaveBeenCalled();
   });
 
+  it('resume --json refuses a --rerun node the workflow lacks, before acknowledging', async () => {
+    const workflowDb = await import('@archon/core/db/workflows');
+    const discovery = await import('@archon/workflows/workflow-discovery');
+    (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
+      id: 'run-rs',
+      workflow_name: 'implement',
+      status: 'failed',
+      working_path: '/tmp/wt',
+    });
+    (discovery.discoverWorkflowsWithConfig as ReturnType<typeof mock>).mockResolvedValueOnce({
+      workflows: [
+        makeTestWorkflowWithSource({
+          name: 'implement',
+          nodes: [{ id: 'open-draft-pr', command: 'pr' }],
+        }),
+      ],
+      errors: [],
+    });
+
+    const exitCode = await workflowResumeCommand(
+      createTestWorkflowHost(),
+      'run-rs',
+      true,
+      undefined,
+      false,
+      ['open-draft-pr', 'open-draft-pr-typo']
+    );
+
+    expect(exitCode).toBe(1);
+    expect(JSON.parse(firstJsonPayload(stdoutSpy))).toMatchObject({
+      ok: false,
+      action: 'resume',
+      error: expect.stringContaining("'open-draft-pr-typo'"),
+    });
+  });
+
+  it('resume --json refuses --rerun when the run records nowhere to load its workflow from', async () => {
+    const workflowDb = await import('@archon/core/db/workflows');
+    (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
+      id: 'run-nowhere',
+      workflow_name: 'implement',
+      status: 'failed',
+    });
+
+    const exitCode = await workflowResumeCommand(
+      createTestWorkflowHost(),
+      'run-nowhere',
+      true,
+      undefined,
+      false,
+      ['open-draft-pr']
+    );
+
+    expect(exitCode).toBe(1);
+    expect(JSON.parse(firstJsonPayload(stdoutSpy))).toMatchObject({ ok: false, action: 'resume' });
+  });
+
   it('resume --json exits nonzero with {ok:false} on a not-found run', async () => {
     const workflowDb = await import('@archon/core/db/workflows');
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce(null);

@@ -2062,6 +2062,35 @@ describe('buildDetachedRunCmd', () => {
     expect(cmd).not.toContain('--detach');
   });
 
+  it('forwards every repeated --rerun of a detached resume to the child', () => {
+    const cmd = buildDetachedRunCmd(
+      false,
+      '/path/to/bun',
+      [
+        '/path/to/bun',
+        '/abs/cli.ts',
+        'workflow',
+        'resume',
+        'run-1',
+        '--rerun',
+        'open-draft-pr',
+        '--rerun',
+        'notify',
+        '--detach',
+      ],
+      '/abs/cwd',
+      []
+    );
+
+    expect(cmd).not.toContain('--detach');
+    expect(cmd.slice(cmd.indexOf('--rerun'), cmd.indexOf('--cwd'))).toEqual([
+      '--rerun',
+      'open-draft-pr',
+      '--rerun',
+      'notify',
+    ]);
+  });
+
   it('binary mode: uses [execPath] only (no duplicated entry arg), drops the Bun SFE virtual argv[1]', () => {
     const cmd = buildDetachedRunCmd(
       true,

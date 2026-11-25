@@ -38,6 +38,7 @@ import { dispatchNode } from './dispatch';
 import { nodePackDir } from '../pack-dir';
 import { runWithPackDir } from '../workflow-variables';
 import { getStaleCachedDependencies } from './stale-dependencies';
+import { formatPriorOutput, recordPriorCacheInvalidated } from './rerun-records';
 /**
  * Await thunks one at a time, collecting outcomes in `Promise.allSettled` shape so the
  * caller's result handling is identical for the sequential and concurrent paths.
@@ -189,7 +190,7 @@ async function runLayerPhase(
  */
 function replayPriorFailure(ctx: RunLayersContext, node: DagNode): LayerNodeResult | undefined {
   const failure = ctx.replayedFailures?.get(node.id);
-  if (failure === undefined || node.always_run) return undefined;
+  if (failure === undefined || node.always_run || ctx.rerunNodeIds?.has(node.id)) return undefined;
   getLog().info(
     { workflowRunId: ctx.workflowRun.id, nodeId: node.id },
     'dag.node_prior_failure_replayed'
@@ -312,7 +313,7 @@ async function suppressFailedLoopInteraction(
 
 /**
  * Replay a node's prior-pass success, or record why it re-executes instead: `always_run`,
- * or a dependency whose value changed since (#2402). Undefined when the node re-executes.
+ * an operator's `--rerun`, or a dependency whose value changed since (#2402). Undefined when the node re-executes.
  */
 async function replayPriorSuccess(
   ctx: RunLayersContext,
@@ -324,6 +325,8 @@ async function replayPriorSuccess(
     await recordAlwaysRunReset(ctx, node, priorCompletedNodes);
     return undefined;
   }
+  // recordOperatorReruns already recorded why this node runs again.
+  if (ctx.rerunNodeIds?.has(node.id)) return undefined;
   if (!priorSuccessIsEligible(ctx, node, composedBoundaryDecision)) return undefined;
   // #2402 — a cached prior-success skip is only safe when every
   // dependency's current value still matches the prior snapshot.
@@ -343,17 +346,6 @@ async function replayPriorSuccess(
     return undefined;
   }
   return replayCachedSuccess(ctx, node, priorCompletedNodes);
-}
-
-function formatPriorOutput(
-  ctx: RunLayersContext,
-  node: DagNode,
-  priorCompletedNodes: ReadonlyMap<string, PersistedNodeOutput>
-): ReturnType<typeof formatPersistedNodeOutput> {
-  return formatPersistedNodeOutput(
-    priorCompletedNodes.get(node.id)?.output ?? '',
-    ctx.artifactsDir
-  );
 }
 
 async function recordAlwaysRunReset(
@@ -389,37 +381,6 @@ function priorSuccessIsEligible(
   return (
     node.trigger_rule !== 'none_failed_min_one_success' ||
     checkTriggerRule(node, ctx.nodeOutputs).decision === 'run'
-  );
-}
-
-async function recordPriorCacheInvalidated(
-  ctx: RunLayersContext,
-  node: DagNode,
-  priorCompletedNodes: ReadonlyMap<string, PersistedNodeOutput>,
-  staleDeps: string[]
-): Promise<void> {
-  // Same rationale as the always_run reset: prior.output can be the full
-  // spilled text, so this audit row needs the same bounding (#2726).
-  const priorOutput = formatPriorOutput(ctx, node, priorCompletedNodes);
-  getLog().info(
-    { nodeId: node.id, invalidatingDeps: staleDeps },
-    'dag.node_prior_cache_invalidated'
-  );
-  await recordNodeState(
-    { store: ctx.deps.store, logDir: ctx.logDir },
-    {
-      runId: ctx.workflowRun.id,
-      path: ctx.stepNamePrefix + node.id,
-      node: describeExecutionNode(node),
-      cache: {
-        action: 'invalidated',
-        invalidatingDeps: staleDeps,
-        prior: {
-          ...persistedExecutionOutput(priorOutput),
-          structured: priorCompletedNodes.get(node.id)?.structuredOutput,
-        },
-      },
-    }
   );
 }
 

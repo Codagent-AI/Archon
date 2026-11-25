@@ -71,6 +71,7 @@ export const serializedNodeDataSchema = z.object({
   prior_output_spill_path: z.string().optional(),
   prior_structured_output: z.unknown().optional(),
   invalidating_deps: z.array(z.string()).optional(),
+  requested_by: z.literal('operator').optional(),
   aggregate: z.boolean().optional(),
   iteration: z.number().optional(),
   output_type: z.string().optional(),
@@ -247,7 +248,9 @@ function serializeCacheDecision({ node, cache }: NodeCacheRecord): SerializedNod
         data: {
           node,
           ...priorOutputFields(cache.prior),
-          reason: 'stale_dependency',
+          ...(cache.requestedBy === undefined
+            ? { reason: 'stale_dependency' as const }
+            : { requested_by: cache.requestedBy }),
           invalidating_deps: cache.invalidatingDeps,
           ...(cache.prior.structured !== undefined
             ? { prior_structured_output: cache.prior.structured }

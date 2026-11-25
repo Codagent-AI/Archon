@@ -42,6 +42,8 @@ import { RunSourceUnreadableError } from './dag/node-source';
 import { type RunInputs, type RunLayersContext } from './dag/run-context';
 import { assertRunCapabilities } from './dag/capability-preflight';
 import { runLayers } from './dag/run-layers';
+import { recordOperatorReruns } from './dag/rerun-records';
+import { withDownstreamNodes } from './rerun-nodes';
 import { publishContainerPause, type ContainerPauseReceipt } from './dag/pause';
 import { restoreRunState, type RestoredRunState } from './dag/resume-state';
 import { failRun, finishRun, skipIfStatusChanged } from './dag/run-terminal';
@@ -65,6 +67,8 @@ export type PriorRunUsage = Pick<DagResumeSnapshot, 'tokens' | 'tokensUnknown' |
 export interface ExecuteDagWorkflowOptions extends RunInputs {
   workflow: ResolvedWorkflow;
   priorCompletedNodes?: Map<string, PersistedNodeOutput>;
+  /** Node ids to execute fresh instead of replaying their prior success. */
+  rerunNodeIds?: ReadonlySet<string>;
   /** Failures from before a pause, replayed instead of re-running their nodes. */
   replayedFailures?: ReadonlyMap<string, PriorFailedNode>;
   /**
@@ -292,6 +296,8 @@ export async function executeDagWorkflow(
     );
   };
 
+  // Before the budget check, so a refused start still keeps the operator's --rerun request.
+  await recordOperatorReruns(runCtx);
   const startRefusal = runBudget && runBudgetStartRefusal(runBudget);
   if (runBudget !== undefined && startRefusal !== undefined) {
     await failRunForBudget(runBudget, startRefusal);
@@ -481,6 +487,7 @@ async function createRunContext(
     configuredCommandFolder,
     issueContext,
     priorCompletedNodes,
+    rerunNodeIds,
     replayedFailures,
     aiProfile,
     workflowPreset,
@@ -558,6 +565,7 @@ async function createRunContext(
     nodeOutputs,
     afterLayer,
     priorCompletedNodes,
+    rerunNodeIds: rerunNodeIds && withDownstreamNodes(workflow.plan.layers.flat(), rerunNodeIds),
     replayedFailures,
     nodeSessionHandles,
     namedSessionNodeIds,

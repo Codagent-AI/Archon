@@ -79,6 +79,8 @@ type ResumePayload =
   | {
       preCreatedRun: WorkflowRun;
       priorCompletedNodes?: Map<string, PersistedNodeOutput>;
+      /** Node ids to execute fresh on this resume instead of replaying their prior success. */
+      rerunNodeIds?: readonly string[];
       /** The prior pass's failures; replayed only when `resumeCause` is `continue_after_wait`. */
       priorFailedNodes?: Map<string, PriorFailedNode>;
       resumeCause?: ResumeCause;
@@ -88,6 +90,7 @@ type ResumePayload =
   | {
       preCreatedRun?: undefined;
       priorCompletedNodes?: undefined;
+      rerunNodeIds?: undefined;
       priorFailedNodes?: undefined;
       resumeCause?: undefined;
       priorUsage?: undefined;
@@ -579,6 +582,7 @@ function dagArgs(
     configuredCommandFolder: config.commands.folder,
     issueContext: opts.issueContext,
     priorCompletedNodes: opts.priorCompletedNodes,
+    rerunNodeIds: opts.rerunNodeIds === undefined ? undefined : new Set(opts.rerunNodeIds),
     // Only a run continued after a pause has moved past its earlier failures.
     replayedFailures:
       opts.resumeCause === 'continue_after_wait' ? opts.priorFailedNodes : undefined,

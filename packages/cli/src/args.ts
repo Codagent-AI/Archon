@@ -44,6 +44,8 @@ export const cliArgOptions: CliArgOptions = {
   occurrence: { type: 'string' },
   // Repeatable: `--choose a --choose b` answers a multi_select attention wait with both.
   choose: { type: 'string', multiple: true },
+  // Repeatable: `workflow resume --rerun a --rerun b` executes those nodes fresh instead of replaying.
+  rerun: { type: 'string', multiple: true },
   // `workflow respond|answer --recommended`: answer with the option the wait recommends.
   recommended: { type: 'boolean' },
   // `workflow approve|reject|respond|answer --as <name>`: the name the answerer declares.

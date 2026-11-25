@@ -55,7 +55,7 @@ Cache decisions carry no new attempt, provider binding, timing, or newly consume
 
 - Replayed: `node_skipped_prior_success`, with the reusable output under the normal output keys.
 - Reset: `node_always_run_reset`, with prior output and its truncation/spill provenance under `prior_*` keys.
-- Invalidated: `node_prior_cache_invalidated`, with prior output, prior structured output when present, `reason: stale_dependency`, and `invalidating_deps`.
+- Invalidated: `node_prior_cache_invalidated`, with prior output, prior structured output when present, and `invalidating_deps`. A dependency change adds `reason: stale_dependency`; an operator's `workflow resume --rerun` adds `requested_by: "operator"` instead, with `invalidating_deps` empty on a named node and listing, on a node downstream of it, the dependencies the rerun reaches it through.
 
 A skipped execution instead carries a lifecycle reason and typed `cause`. The cause identifies condition evaluation, a condition parse error, timeout, or an upstream failure/skip with its origin. Cache records and skip lifecycle records are separate contracts.
 
@@ -797,6 +797,7 @@ Presence is relative to the containing object: a required child of an optional p
 | `cache.prior.persisted.spillPath`      | `string`                     | optional | `cache.action = "invalidated"`                      |
 | `cache.invalidatingDeps`               | `array<string>`              | required | `cache.action = "invalidated"`                      |
 | `cache.invalidatingDeps[]`             | `string`                     | item     | `cache.action = "invalidated"`                      |
+| `cache.requestedBy`                    | `"operator"`                 | optional | `cache.action = "invalidated"`                      |
 
 ### Persisted event data
 
@@ -1077,6 +1078,7 @@ Presence is relative to the containing object: a required child of an optional p
 | `prior_structured_output`                                   | `unknown`                                                                                                                                                                                   | optional | —                                                                                           |
 | `invalidating_deps`                                         | `array<string>`                                                                                                                                                                             | optional | —                                                                                           |
 | `invalidating_deps[]`                                       | `string`                                                                                                                                                                                    | item     | —                                                                                           |
+| `requested_by`                                              | `"operator"`                                                                                                                                                                                | optional | —                                                                                           |
 | `aggregate`                                                 | `boolean`                                                                                                                                                                                   | optional | —                                                                                           |
 | `iteration`                                                 | `number`                                                                                                                                                                                    | optional | —                                                                                           |
 | `output_type`                                               | `string`                                                                                                                                                                                    | optional | —                                                                                           |

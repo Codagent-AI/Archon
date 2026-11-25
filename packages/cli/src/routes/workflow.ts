@@ -274,7 +274,8 @@ export async function runWorkflowResume(route: WorkflowRoute): Promise<number> {
     resumeRunId,
     route.json,
     route.effectiveCwd,
-    route.values.detach as boolean | undefined
+    route.values.detach as boolean | undefined,
+    (route.values.rerun as string[] | undefined) ?? []
   );
 }
 

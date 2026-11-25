@@ -345,6 +345,7 @@ async function resumeRun(
       userMessage: request.userMessage,
       run: resumable,
       cursor: request.options.continuationCursor,
+      rerunNodeIds: request.options.rerun,
       options: prepareAdmitted ? undefined : commonRunOptions(launch, onExecutionClaimed),
       ...(prepareAdmitted ? { prepareExecution: prepareAdmitted } : {}),
     });

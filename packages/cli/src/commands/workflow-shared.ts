@@ -95,6 +95,8 @@ export interface WorkflowRunOptions {
    */
   continuationRun?: WorkflowRun;
   continuationCursor?: WorkflowResumeCursor;
+  /** Top-level node ids a resume executes fresh instead of replaying (`workflow resume --rerun`). */
+  rerun?: string[];
   quiet?: boolean;
   verbose?: boolean;
   /** Platform conversation ID (e.g. `cli-{ts}-{rand}`), NOT a DB UUID. */
